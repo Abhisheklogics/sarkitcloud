@@ -133,6 +133,7 @@ a {
 .btn-accent {
   background: var(--accent);
   color: #ffffff;
+  width: fit-content;
 }
 
 .btn-accent:hover {
