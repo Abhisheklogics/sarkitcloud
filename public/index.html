@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sarkited &mdash; IoT Device Cloud</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css?v=4">
+<script src="js/theme.js?v=3"></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="index.html" class="nav-brand">
+    <svg class="nav-logo" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="9" y="9" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+      <circle cx="14" cy="14" r="2" fill="currentColor"/>
+      <path d="M14 2V9M14 19V26M2 14H9M19 14H26" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>
+    <span>SarkitCloud</span>
+  </a>
+  <div class="nav-actions">
+    <button type="button" class="theme-toggle" id="themeToggle" aria-label="Switch to dark theme" aria-pressed="false" title="Switch to dark theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+      </svg>
+    </button>
+    <button class="btn btn-accent" id="navCreateBtn">+ New channel</button>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div class="hero-copy">
+      <h1>Connect any device.<br>Watch the data arrive.</h1>
+      <p style="text-align: justify;">Sarkited collects readings from ESP32, Arduino, Raspberry Pi, or anything that can make an HTTP request &mdash; stores them, charts them, and pushes every update to your screen the instant it lands. Up to 20 fields per channel, no daily limits.</p>
+      <button class="btn btn-accent btn-lg" id="heroCreateBtn">Create a channel</button>
+    </div>
+    <div class="hero-media">
+      <img src="https://ik.imagekit.io/abhi1212/circuitphotos/SARKIT-Final.webp" alt="Sarkited circuit board" height="400" width="600">
+    </div>
+  </div>
+</header>
+
+<main class="container">
+  <section id="summaryBar" class="analytics-stats"></section>
+
+  <section class="section-block" id="getStarted">
+    <div class="section-heading">
+      <h2>Get your device sending data in 2 minutes</h2>
+    </div>
+    <div class="card">
+      <div id="hardwarePanel">
+        <ol style="line-height:1.8;">
+          <li>Create a channel above and copy its <strong>Write API Key</strong> from the channel page.</li>
+          <li>Open Arduino IDE with ESP32 board support installed (<code>WiFi.h</code> and <code>HTTPClient.h</code> are built in).</li>
+          <li>Paste the sketch below. Change only <strong>WRITE_API_KEY</strong> and <strong>SERVER_URL</strong> &mdash; nothing else needs to change.</li>
+          <li>Flash it to your ESP32 / ESP8266 board. It posts a reading every 15 seconds using plain HTTP.</li>
+          <li>Open the channel page here and watch live values and charts update in real time.</li>
+        </ol>
+        <pre id="hardwareCode" style="background:#0d1117; color:#d6e2ea; padding:16px; border-radius:8px; overflow-x:auto; font-family:'IBM Plex Mono', monospace; font-size:13px; white-space:pre;"></pre>
+        <button type="button" class="btn btn-ghost" id="copyHardwareBtn">Copy code</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="section-block">
+    <div class="section-heading">
+      <h2>Your channels</h2>
+    </div>
+    <div id="channelsList" class="channels-grid"></div>
+  </section>
+</main>
+
+<footer class="site-footer">
+  <span>Sarkited &mdash; sarkitedtech.com</span>
+</footer>
+
+<div class="modal-backdrop" id="modalBackdrop">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Create a channel</h2>
+      <button class="modal-close" id="modalCloseBtn" aria-label="Close">&times;</button>
+    </div>
+    <form id="channelForm">
+      <label>Channel name</label>
+      <input type="text" id="name" required maxlength="60" placeholder="Garage Temperature">
+      <label>Description</label>
+      <input type="text" id="description" maxlength="120" placeholder="Optional">
+      <label>Fields (up to 20)</label>
+      <div id="fieldsWrap">
+        <input type="text" class="fieldInput" placeholder="Field 1 name, e.g. temperature" required>
+      </div>
+      <button type="button" id="addFieldBtn" class="btn btn-ghost">+ Add field</button>
+      <button type="submit" id="createBtn" class="btn btn-accent">Create channel</button>
+    </form>
+  </div>
+</div>
+
+<script src="js/config.js"></script>
+<script src="js/onboarding.js"></script>
+<script src="js/home.js"></script>
+</body>
+</html>

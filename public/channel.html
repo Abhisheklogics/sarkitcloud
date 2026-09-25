@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Channel &mdash; Sarkited</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/style.css?v=4">
+<link rel="stylesheet" href="css/channel-extra.css?v=1">
+<script src="js/theme.js?v=3"></script>
+</head>
+<body>
+
+<nav class="nav">
+  <a href="index.html" class="nav-brand">
+    <svg class="nav-logo" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="9" y="9" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
+      <circle cx="14" cy="14" r="2" fill="currentColor"/>
+      <path d="M14 2V9M14 19V26M2 14H9M19 14H26" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/>
+    </svg>
+    <span>SarkitCloud</span>
+  </a>
+  <div class="nav-actions">
+    <button type="button" class="theme-toggle" id="themeToggle" aria-label="Switch to dark theme" aria-pressed="false" title="Switch to dark theme">
+      <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+      </svg>
+      <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <circle cx="12" cy="12" r="4"/>
+        <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
+      </svg>
+    </button>
+    <a href="index.html" class="btn btn-ghost">&larr; All channels</a>
+  </div>
+</nav>
+
+<main class="container channel-page">
+  <h1 id="channelName" class="page-title">Channel</h1>
+
+  <section class="card">
+    <h2>Channel details</h2>
+    <div class="id-row">
+      <span class="id-label">Channel ID</span>
+      <span class="id-value" id="channelId"></span>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Write API key</span>
+      <span class="id-value" id="writeKey"></span>
+      <button class="copy-btn" data-copy-target="writeKey">Copy</button>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Read API key</span>
+      <span class="id-value" id="readKey"></span>
+      <button class="copy-btn" data-copy-target="readKey">Copy</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>API usage</h2>
+    <div class="id-row">
+      <span class="id-label">Write URL (POST)</span>
+      <span class="id-value" id="apiWriteUrl"></span>
+      <button class="copy-btn" data-copy-target="apiWriteUrl">Copy</button>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Write body</span>
+      <span class="id-value" id="apiWriteBody"></span>
+      <button class="copy-btn" data-copy-target="apiWriteBody">Copy</button>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Write (GET)</span>
+      <span class="id-value" id="apiWriteGet"></span>
+      <button class="copy-btn" data-copy-target="apiWriteGet">Copy</button>
+    </div>
+    <p class="hint">Upar wali teeno lines (Write URL, Write body, Write GET) same kaam ke alag tarike hain &mdash; jo bhi aapka ESP32/Arduino/simulator code use karta ho (URL me, POST body me, ya form data me), usi se matching wali line copy kar lo. Sirf ek use karna hai, teeno nahi.</p>
+    <div class="id-row">
+      <span class="id-label">Read last value</span>
+      <span class="id-value" id="apiReadLast"></span>
+      <button class="copy-btn" data-copy-target="apiReadLast">Copy</button>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Read (no channel ID)</span>
+      <span class="id-value" id="apiRead"></span>
+      <button class="copy-btn" data-copy-target="apiRead">Copy</button>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Read CSV</span>
+      <span class="id-value" id="apiCsv"></span>
+      <button class="copy-btn" data-copy-target="apiCsv">Copy</button>
+    </div>
+    <p class="hint">Ye teeno tab kaam aati hain jab aapko apna data <strong>kisi aur jagah</strong> use karna ho &mdash; jaise apni khud ki website/app me sensor value dikhani ho, ya poora history CSV me download karna ho. Agar aap sirf iss dashboard par dekh rahe ho, to inki zaroorat nahi.</p>
+    <p class="hint">On a real device, replace localhost with your PC's LAN IP or your live domain. On https domains leave out the port. Only api_key and device_id matter &mdash; no channel ID needed to write.</p>
+  </section>
+
+  <section class="card">
+    <h2>Analytics</h2>
+    <div class="analytics-stats">
+      <div class="stat-box"><span class="stat-value" id="statTotalEntries">0</span><span class="stat-label">Total entries</span></div>
+      <div class="stat-box"><span class="stat-value" id="statEntriesToday">0</span><span class="stat-label">Entries today</span></div>
+      <div class="stat-box"><span class="stat-value" id="statDeviceCount">0</span><span class="stat-label">Devices</span></div>
+    </div>
+    <canvas id="analyticsChart" height="90"></canvas>
+  </section>
+
+  <section class="card">
+    <h2>Live values <span class="live-indicator">real-time</span></h2>
+    <div id="liveValues" class="devices-live-grid"></div>
+  </section>
+
+  <section class="card">
+    <h2>Devices</h2>
+    <div id="devicesList" class="devices-list"></div>
+  </section>
+
+  <section class="card">
+    <h2>Channel settings</h2>
+    <form id="settingsForm" class="settings-form">
+      <label for="minInterval">Minimum interval between stored entries (seconds)</label>
+      <input type="number" id="minInterval" min="1" max="3600">
+      <button type="submit" class="btn btn-accent">Save settings</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Charts</h2>
+    <div id="chartsWrap" class="charts-grid"></div>
+  </section>
+
+  <section class="card">
+    <h2>Export data</h2>
+    <form id="exportForm" class="export-form">
+      <div class="export-grid">
+        <label for="exportStart">From
+          <input type="date" id="exportStart">
+        </label>
+        <label for="exportEnd">To
+          <input type="date" id="exportEnd">
+        </label>
+        <label for="exportDevice">Device
+          <select id="exportDevice">
+            <option value="">All devices</option>
+          </select>
+        </label>
+      </div>
+      <button type="submit" id="exportBtn" class="btn btn-accent">Download CSV</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Recent stored entries</h2>
+    <div class="table-scroll">
+      <table id="feedsTable">
+        <thead><tr id="feedsHeader"></tr></thead>
+        <tbody id="feedsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card danger">
+    <h2>Danger zone</h2>
+    <div class="danger-actions">
+      <button id="clearBtn" class="btn btn-danger-outline">Clear data</button>
+      <button id="deleteBtn" class="btn btn-danger">Delete channel</button>
+    </div>
+  </section>
+</main>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="js/config.js"></script>
+<script src="js/channel.js"></script>
+</body>
+</html>
