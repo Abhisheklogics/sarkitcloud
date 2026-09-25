@@ -4,7 +4,7 @@ const hardwareCode = `#include <WiFi.h>
 const char* WIFI_SSID = "YOUR_WIFI_SSID";
 const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
 const char* WRITE_API_KEY = "YOUR_WRITE_API_KEY";
-const char* SERVER_URL = "http://YOUR_SERVER_IP:4000/update";
+const char* SERVER_URL = "https://sarkitcloud.onrender.com/update";
 
 void setup() {
   Serial.begin(115200);
