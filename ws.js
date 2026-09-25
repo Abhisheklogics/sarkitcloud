@@ -1,4 +1,6 @@
 const { WebSocketServer } = require('ws');
+const crypto = require('crypto');
+const supabase = require('./supabaseClient');
 
 const rooms = new Map();
 const HEARTBEAT_INTERVAL = 30000;
@@ -13,7 +15,26 @@ function originAllowed(req) {
   }
 }
 
-function setup(server, isAuthorized) {
+function safeEqual(a, b) {
+  const left = Buffer.from(String(a || ''));
+  const right = Buffer.from(String(b || ''));
+  return left.length === right.length && crypto.timingSafeEqual(left, right);
+}
+
+async function channelAllowsConnection(channelIdRaw, adminKey) {
+  const id = Number(channelIdRaw);
+  if (!Number.isInteger(id)) return false;
+  const { data: channel, error } = await supabase
+    .from('channels')
+    .select('is_public, admin_key')
+    .eq('id', id)
+    .single();
+  if (error || !channel) return false;
+  if (channel.is_public !== false) return true;
+  return Boolean(adminKey) && safeEqual(channel.admin_key, adminKey);
+}
+
+function setup(server) {
   const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 });
 
   const heartbeat = setInterval(() => {
@@ -29,20 +50,28 @@ function setup(server, isAuthorized) {
 
   wss.on('close', () => clearInterval(heartbeat));
 
-  wss.on('connection', (socket, req) => {
+  wss.on('connection', async (socket, req) => {
     if (!originAllowed(req)) {
       socket.close(1008, 'bad origin');
-      return;
-    }
-    if (typeof isAuthorized === 'function' && !isAuthorized(req)) {
-      socket.close(1008, 'unauthorized');
       return;
     }
 
     const url = new URL(req.url, 'http://localhost');
     const channelId = url.searchParams.get('channel');
+    const adminKey = url.searchParams.get('admin_key');
     if (!channelId) {
       socket.close();
+      return;
+    }
+
+    let allowed = false;
+    try {
+      allowed = await channelAllowsConnection(channelId, adminKey);
+    } catch (err) {
+      console.error('ws channel check crashed:', err);
+    }
+    if (!allowed) {
+      socket.close(1008, 'unauthorized');
       return;
     }
 

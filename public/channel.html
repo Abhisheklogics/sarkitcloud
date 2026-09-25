@@ -74,7 +74,7 @@
       <span class="id-value" id="apiWriteGet"></span>
       <button class="copy-btn" data-copy-target="apiWriteGet">Copy</button>
     </div>
-    <p class="hint">The three lines above (Write URL, Write body, Write GET) are different ways to achieve the same result—simply copy the line that matches the method your ESP32, Arduino, or simulator code uses (whether it's via the URL, POST body, or form data). You only need to use one of them, not all three.</p>
+    <p class="hint">The three lines above (Write URL, Write body, Write GET) are different ways to achieve the same result&mdash;simply copy the line that matches the method your ESP32, Arduino, or simulator code uses (whether it's via the URL, POST body, or form data). You only need to use one of them, not all three.</p>
     <div class="id-row">
       <span class="id-label">Read last value</span>
       <span class="id-value" id="apiReadLast"></span>
@@ -89,6 +89,16 @@
       <span class="id-label">Read CSV</span>
       <span class="id-value" id="apiCsv"></span>
       <button class="copy-btn" data-copy-target="apiCsv">Copy</button>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Poll commands (JSON, needs ArduinoJson)</span>
+      <span class="id-value" id="apiCommandJson"></span>
+      <button class="copy-btn" data-copy-target="apiCommandJson">Copy</button>
+    </div>
+    <div class="id-row">
+      <span class="id-label">Poll commands (plain text, no library)</span>
+      <span class="id-value" id="apiCommandText"></span>
+      <button class="copy-btn" data-copy-target="apiCommandText">Copy</button>
     </div>
     <p class="hint">All three are useful when you need to restore your data.<strong>Somewhere else</strong> If he/she has to do it &mdash; For instance, if you want to display sensor values ​​on your own website or app, or download the full history as a CSV file. If you are only viewing the data on this dashboard, then these aren't necessary.</p>
     <p class="hint">On a real device, replace localhost with your PC's LAN IP or your live domain. On https domains leave out the port. Only api_key and device_id matter &mdash; no channel ID needed to write.</p>
@@ -115,10 +125,35 @@
   </section>
 
   <section class="card">
+    <h2>Device control</h2>
+    <form id="commandForm" class="settings-form">
+      <label for="commandDevice">Target device</label>
+      <select id="commandDevice">
+        <option value="all">All devices</option>
+      </select>
+      <label for="commandName">Command</label>
+      <input type="text" id="commandName" maxlength="60" placeholder="e.g. LED_ON, RELAY_TOGGLE" required>
+      <label for="commandPayload">Payload (optional JSON)</label>
+      <input type="text" id="commandPayload" placeholder='e.g. {"duration_ms": 3000}'>
+      <button type="submit" class="btn btn-accent">Send command</button>
+    </form>
+    <div class="table-scroll">
+      <table id="commandsTable">
+        <thead><tr><th>Time</th><th>Device</th><th>Command</th><th>Status</th></tr></thead>
+        <tbody id="commandsBody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
     <h2>Channel settings</h2>
     <form id="settingsForm" class="settings-form">
       <label for="minInterval">Minimum interval between stored entries (seconds)</label>
       <input type="number" id="minInterval" min="1" max="3600">
+      <label class="checkbox-row">
+        <input type="checkbox" id="isPublic">
+        Public channel (anyone with the link can view charts and live data)
+      </label>
       <button type="submit" class="btn btn-accent">Save settings</button>
     </form>
   </section>

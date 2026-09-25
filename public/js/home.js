@@ -72,7 +72,11 @@ channelForm.addEventListener('submit', async (e) => {
     return;
   }
 
-  const channel = await res.json();
+    const channel = await res.json();
+  setAdminKey(channel.id, channel.admin_key);
+  alert(
+    `Channel created!\n\nSAVE THIS ADMIN KEY somewhere safe \u2014 it's your only way to manage this channel from another device/browser:\n\n${channel.admin_key}\n\nIt's already saved in this browser, but if you clear browser data or switch devices, you'll lose admin access unless you back it up.`
+  );
   window.location.href = `channel.html?id=${encodeURIComponent(channel.id)}`;
 });
 

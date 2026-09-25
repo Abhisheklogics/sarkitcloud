@@ -16,9 +16,12 @@ const router = express.Router();
 const FIELD_COUNT = 20;
 const MAX_KEY_LENGTH = 128;
 const MAX_RESULTS = 200;
+const MAX_BULK_ENTRIES = 100;
+const MAX_COMMANDS_PER_POLL = 5;
 const NON_NUMERIC_TOKENS = /^(nan|inf|-inf|\+inf|ovf|null|undefined)$/i;
 const NUMBER_PATTERN = /^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/;
 const NOT_FOUND_CODE = 'PGRST116';
+const MAX_FUTURE_SKEW_MS = 5 * 60 * 1000;
 
 const readLimiter = rateLimit({
   windowMs: 60 * 1000,
@@ -30,6 +33,13 @@ const readLimiter = rateLimit({
 const exportLimiter = rateLimit({
   windowMs: 60 * 1000,
   max: 10,
+  standardHeaders: true,
+  legacyHeaders: false
+});
+
+const bulkLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false
 });
@@ -84,6 +94,14 @@ function parseFieldNumber(raw) {
   return Number.isInteger(n) && n >= 1 && n <= FIELD_COUNT ? n : NaN;
 }
 
+function parseCreatedAt(raw) {
+  if (raw === undefined || raw === null || raw === '') return null;
+  const date = new Date(raw);
+  if (Number.isNaN(date.getTime())) return undefined;
+  if (date.getTime() > Date.now() + MAX_FUTURE_SKEW_MS) return undefined;
+  return date.toISOString();
+}
+
 function shapeFeed(feed, channel, onlyField) {
   const out = {
     entry_id: feed.id,
@@ -98,6 +116,16 @@ function shapeFeed(feed, channel, onlyField) {
   return out;
 }
 
+function extractFields(source) {
+  const fields = {};
+  for (let i = 1; i <= FIELD_COUNT; i++) {
+    const key = `field${i}`;
+    const value = parseFieldValue(source[key]);
+    if (value !== undefined) fields[key] = value;
+  }
+  return fields;
+}
+
 async function handleUpdate(req, res) {
   try {
     const body = req.body && typeof req.body === 'object' ? req.body : {};
@@ -106,14 +134,11 @@ async function handleUpdate(req, res) {
     if (!apiKey) return res.status(400).send('0');
 
     const deviceId = sanitizeDeviceId(params.device_id);
-
-    const fields = {};
-    for (let i = 1; i <= FIELD_COUNT; i++) {
-      const key = `field${i}`;
-      const value = parseFieldValue(params[key]);
-      if (value !== undefined) fields[key] = value;
-    }
+    const fields = extractFields(params);
     if (Object.keys(fields).length === 0) return res.status(400).send('0');
+
+    const createdAt = parseCreatedAt(params.created_at);
+    if (createdAt === undefined) return res.status(400).send('0');
 
     const { data: channel, error } = await supabase
       .from('channels')
@@ -147,13 +172,16 @@ async function handleUpdate(req, res) {
       updatedAt: liveState.updatedAt
     });
 
-    if (!canStore(channel.id, deviceId, channel.min_interval_seconds)) {
+    if (!createdAt && !canStore(channel.id, deviceId, channel.min_interval_seconds)) {
       return res.status(200).send('0');
     }
 
+    const insertPayload = { channel_id: channel.id, device_id: deviceId, ...fields };
+    if (createdAt) insertPayload.created_at = createdAt;
+
     const { data: feed, error: insertError } = await supabase
       .from('feeds')
-      .insert({ channel_id: channel.id, device_id: deviceId, ...fields })
+      .insert(insertPayload)
       .select()
       .single();
 
@@ -169,6 +197,186 @@ async function handleUpdate(req, res) {
     console.error('update crashed:', err);
     return res.status(500).send('0');
   }
+}
+
+async function handleBulkUpdate(req, res) {
+  try {
+    const body = req.body && typeof req.body === 'object' ? req.body : {};
+    const apiKey = extractApiKey(req, body);
+    if (!apiKey) return res.status(400).json({ error: 'api_key is required' });
+
+    const entries = Array.isArray(body.updates) ? body.updates.slice(0, MAX_BULK_ENTRIES) : [];
+    if (entries.length === 0) return res.status(400).json({ error: 'updates array is required' });
+
+    const { data: channel, error } = await supabase
+      .from('channels')
+      .select('id,min_interval_seconds')
+      .eq('write_api_key', apiKey)
+      .single();
+
+    if (error && error.code !== NOT_FOUND_CODE) {
+      console.error('bulk update channel lookup error:', error);
+      return res.status(500).json({ error: 'internal server error' });
+    }
+    if (!channel) return res.status(401).json({ error: 'invalid write api key' });
+
+    const rows = [];
+    const results = [];
+
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') {
+        results.push({ ok: false, error: 'invalid entry' });
+        continue;
+      }
+      const fields = extractFields(entry);
+      if (Object.keys(fields).length === 0) {
+        results.push({ ok: false, error: 'no valid fields' });
+        continue;
+      }
+      const createdAt = parseCreatedAt(entry.created_at);
+      if (createdAt === undefined) {
+        results.push({ ok: false, error: 'invalid created_at' });
+        continue;
+      }
+      const deviceId = sanitizeDeviceId(entry.device_id);
+      const row = { channel_id: channel.id, device_id: deviceId, ...fields };
+      if (createdAt) row.created_at = createdAt;
+      rows.push(row);
+      results.push({ ok: true });
+    }
+
+    if (rows.length === 0) return res.status(400).json({ error: 'no valid entries', results });
+
+    const { data: inserted, error: insertError } = await supabase
+      .from('feeds')
+      .insert(rows)
+      .select('id');
+
+    if (insertError) {
+      console.error('bulk insert error:', insertError);
+      return res.status(500).json({ error: 'insert failed' });
+    }
+
+    const deviceIds = [...new Set(rows.map((r) => r.device_id))];
+    supabase
+      .from('devices')
+      .upsert(
+        deviceIds.map((deviceId) => ({
+          channel_id: channel.id,
+          device_id: deviceId,
+          last_seen_at: new Date().toISOString()
+        })),
+        { onConflict: 'channel_id,device_id' }
+      )
+      .then(({ error: upsertError }) => {
+        if (upsertError) console.error('bulk device upsert failed:', upsertError);
+      })
+      .catch((err) => console.error('bulk device upsert crashed:', err));
+
+    const lastRow = rows[rows.length - 1];
+    const lastFields = Object.fromEntries(
+      Object.entries(lastRow).filter(([key]) => key.startsWith('field'))
+    );
+    const liveState = updateLive(channel.id, lastRow.device_id, lastFields);
+    markStored(channel.id, lastRow.device_id);
+
+    ws.broadcast(channel.id, {
+      type: 'live',
+      deviceId: lastRow.device_id,
+      fields: liveState.fields,
+      updatedAt: liveState.updatedAt
+    });
+    ws.broadcast(channel.id, { type: 'bulk', count: inserted.length });
+
+    return res.status(200).json({ inserted: inserted.length, results });
+  } catch (err) {
+    console.error('bulk update crashed:', err);
+    return res.status(500).json({ error: 'internal server error' });
+  }
+}
+
+async function handleCommandPoll(req, res) {
+  const apiKey = extractApiKey(req, req.query);
+  if (!apiKey) return res.status(400).json({ error: 'api_key is required' });
+  const deviceId = sanitizeDeviceId(req.query.device_id);
+  const wantsText = req.query.format === 'text';
+
+  const { data: channel, error } = await supabase
+    .from('channels')
+    .select('id')
+    .eq('write_api_key', apiKey)
+    .single();
+  if (error && error.code !== NOT_FOUND_CODE) throw error;
+  if (!channel) {
+    return wantsText
+      ? res.status(401).type('text/plain').send('')
+      : res.status(401).json({ error: 'invalid write api key' });
+  }
+
+  const { data: pending, error: cmdError } = await supabase
+    .from('commands')
+    .select('*')
+    .eq('channel_id', channel.id)
+    .in('device_id', [deviceId, 'all'])
+    .eq('status', 'pending')
+    .order('created_at', { ascending: true })
+    .limit(MAX_COMMANDS_PER_POLL);
+
+  if (cmdError) throw cmdError;
+
+  if (!pending || pending.length === 0) {
+    return wantsText ? res.type('text/plain').send('') : res.json({ commands: [] });
+  }
+
+  const ids = pending.map((c) => c.id);
+  const { error: updateError } = await supabase
+    .from('commands')
+    .update({ status: 'delivered', delivered_at: new Date().toISOString() })
+    .in('id', ids);
+  if (updateError) console.error('command delivery mark failed:', updateError);
+
+  if (wantsText) {
+    const lines = pending.map((c) => `${c.id}|${c.command}`).join('\n');
+    return res.type('text/plain').send(lines);
+  }
+
+  return res.json({
+    commands: pending.map((c) => ({
+      command_id: c.id,
+      command: c.command,
+      payload: c.payload || null
+    }))
+  });
+}
+
+async function handleCommandAck(req, res) {
+  const body = req.body && typeof req.body === 'object' ? req.body : {};
+  const params = { ...req.query, ...body };
+  const apiKey = extractApiKey(req, params);
+  if (!apiKey) return res.status(400).json({ error: 'api_key is required' });
+
+  const commandId = Number(params.command_id);
+  if (!Number.isInteger(commandId)) return res.status(400).json({ error: 'invalid command_id' });
+
+  const { data: channel, error } = await supabase
+    .from('channels')
+    .select('id')
+    .eq('write_api_key', apiKey)
+    .single();
+  if (error && error.code !== NOT_FOUND_CODE) throw error;
+  if (!channel) return res.status(401).json({ error: 'invalid write api key' });
+
+  const { data, error: ackError } = await supabase
+    .from('commands')
+    .update({ status: 'acked', acked_at: new Date().toISOString() })
+    .eq('id', commandId)
+    .eq('channel_id', channel.id)
+    .select()
+    .single();
+  if (ackError && ackError.code !== NOT_FOUND_CODE) throw ackError;
+  if (!data) return res.status(404).json({ error: 'command not found' });
+
+  return res.json({ ok: true });
 }
 
 async function authorizeChannelRead(req, res) {
@@ -240,6 +448,9 @@ async function serveRead(req, res, channel) {
 
 router.get('/update', handleUpdate);
 router.post('/update', handleUpdate);
+router.post('/update/bulk', bulkLimiter, guard(handleBulkUpdate));
+router.get('/command', readLimiter, guard(handleCommandPoll));
+router.post('/command/ack', readLimiter, guard(handleCommandAck));
 
 router.get('/read', readLimiter, guard(async (req, res) => {
   const key = extractApiKey(req, req.query);

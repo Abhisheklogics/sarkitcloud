@@ -5,6 +5,7 @@
   margin-right: 8px;
   border-radius: 50%;
   background: #22c55e;
+  flex-shrink: 0;
 }
 
 .live-dot.flash {
@@ -20,6 +21,7 @@
   font-family: 'IBM Plex Mono', monospace;
   font-size: 12px;
   opacity: 0.8;
+  white-space: nowrap;
 }
 
 .device-live-card.is-stale .live-dot {
@@ -55,6 +57,7 @@
   font-family: 'IBM Plex Mono', monospace;
   font-size: 12px;
   opacity: 0.85;
+  white-space: nowrap;
 }
 
 .chart-latest.flash {
@@ -84,12 +87,144 @@
   display: flex;
   flex-direction: column;
   gap: 6px;
+  font-size: 13px;
+  min-width: 0;
+}
+
+.export-form input,
+.export-form select {
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
 }
 
 .hint {
   margin-top: 10px;
   font-size: 12px;
   opacity: 0.75;
+  line-height: 1.5;
+}
+
+.id-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.id-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  flex: 1 1 200px;
+}
+
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.charts-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+}
+
+.chart-box {
+  min-width: 0;
+}
+
+.chart-box canvas {
+  max-width: 100%;
+}
+
+.devices-live-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.device-live-card {
+  min-width: 0;
+}
+
+.device-live-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.fields-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 8px;
+}
+
+.danger-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+@media (max-width: 768px) {
+  .id-value {
+    font-size: 13px;
+  }
+
+  .chart-head {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 4px;
+  }
+
+  .export-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .charts-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .devices-live-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .fields-grid {
+    grid-template-columns: repeat(auto-fit, minmax(80px, 1fr));
+  }
+
+  .copy-btn {
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+
+  .danger-actions {
+    flex-direction: column;
+  }
+
+  .danger-actions .btn {
+    width: 100%;
+  }
+}
+
+@media (max-width: 480px) {
+  .fields-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .live-age {
+    font-size: 11px;
+  }
+
+  .chart-latest {
+    font-size: 11px;
+  }
+
+  .hint {
+    font-size: 11px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

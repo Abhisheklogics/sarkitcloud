@@ -45,8 +45,8 @@ function flash(node) {
   node.classList.add('flash');
 }
 
-async function getJson(url) {
-  const res = await fetch(url);
+async function getJson(url, options) {
+  const res = await fetch(url, options);
   if (!res.ok) throw new Error(`${res.status} ${url}`);
   return res.json();
 }
@@ -208,6 +208,8 @@ function fillApiUsage(ch) {
   set('apiReadLast', `${origin}/channels/${ch.id}/fields/1/last.txt?api_key=${readKey}`);
   set('apiRead', `${origin}/read?api_key=${readKey}&field=1`);
   set('apiCsv', `${origin}/channels/${ch.id}/feeds.csv?api_key=${readKey}`);
+  set('apiCommandJson', `${origin}/command?api_key=${writeKey}&device_id=device-1`);
+  set('apiCommandText', `${origin}/command?api_key=${writeKey}&device_id=device-1&format=text`);
 }
 
 async function loadChannel() {
@@ -217,7 +219,7 @@ async function loadChannel() {
     throw new Error('missing channel id');
   }
 
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}`);
+  const res = await fetch(`${API_BASE}/api/channels/${channelId}`, { headers: adminHeaders(channelId) });
   if (!res.ok) {
     alert('Channel not found');
     window.location.href = 'index.html';
@@ -226,9 +228,10 @@ async function loadChannel() {
   const ch = await res.json();
   document.getElementById('channelName').textContent = ch.name;
   document.getElementById('channelId').textContent = ch.id;
-  document.getElementById('writeKey').textContent = ch.write_api_key;
-  document.getElementById('readKey').textContent = ch.read_api_key;
+  document.getElementById('writeKey').textContent = ch.write_api_key || 'Hidden \u2014 open from the browser you created this channel in';
+  document.getElementById('readKey').textContent = ch.read_api_key || 'Hidden \u2014 open from the browser you created this channel in';
   document.getElementById('minInterval').value = ch.min_interval_seconds;
+  document.getElementById('isPublic').checked = ch.is_public !== false;
   staleAfterMs = Math.max(60, Number(ch.min_interval_seconds) * 3) * 1000;
 
   channelFields = [];
@@ -236,7 +239,7 @@ async function loadChannel() {
     if (ch[`field${i}`]) channelFields.push({ key: `field${i}`, label: ch[`field${i}`] });
   }
 
-  fillApiUsage(ch);
+  if (ch.write_api_key && ch.read_api_key) fillApiUsage(ch);
 
   const chartsWrap = document.getElementById('chartsWrap');
   chartsWrap.innerHTML = '';
@@ -435,7 +438,9 @@ function setConnection(online) {
 }
 
 function connectWebSocket() {
-  socket = new WebSocket(`${WS_BASE}/ws?channel=${channelId}`);
+  const adminKey = getAdminKey(channelId);
+  const wsUrl = `${WS_BASE}/ws?channel=${channelId}${adminKey ? `&admin_key=${encodeURIComponent(adminKey)}` : ''}`;
+  socket = new WebSocket(wsUrl);
 
   socket.onopen = () => {
     setConnection(true);
@@ -452,6 +457,10 @@ function connectWebSocket() {
     }
     if (msg.type === 'live') renderDeviceLive(msg.deviceId, msg.fields, msg.updatedAt);
     if (msg.type === 'feed') handleFeed(msg.feed);
+    if (msg.type === 'bulk') {
+      loadFeeds();
+      loadAnalytics();
+    }
   };
 
   socket.onclose = () => {
@@ -468,6 +477,19 @@ function populateExportDevices(devices) {
   const select = document.getElementById('exportDevice');
   const current = select.value;
   select.innerHTML = '<option value="">All devices</option>';
+  devices.forEach((d) => {
+    const option = document.createElement('option');
+    option.value = d.device_id;
+    option.textContent = d.name || d.device_id;
+    select.appendChild(option);
+  });
+  select.value = current;
+}
+
+function populateCommandDevices(devices) {
+  const select = document.getElementById('commandDevice');
+  const current = select.value;
+  select.innerHTML = '<option value="all">All devices</option>';
   devices.forEach((d) => {
     const option = document.createElement('option');
     option.value = d.device_id;
@@ -496,6 +518,7 @@ async function loadDevices() {
   devices.forEach((d) => deviceNames.set(d.device_id, d.name || d.device_id));
   refreshDeviceLabels();
   populateExportDevices(devices);
+  populateCommandDevices(devices);
 
   list.innerHTML = devices.map((d) => `
     <div class="device-item">
@@ -514,7 +537,7 @@ async function loadDevices() {
       if (!newName || !newName.trim()) return;
       const res = await fetch(`${API_BASE}/api/devices/${btn.dataset.id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...adminHeaders(channelId) },
         body: JSON.stringify({ name: newName.trim() })
       });
       if (!res.ok) alert('Rename failed');
@@ -525,7 +548,10 @@ async function loadDevices() {
   list.querySelectorAll('.delete-device-btn').forEach((btn) => {
     btn.addEventListener('click', async () => {
       if (!confirm('Remove this device record?')) return;
-      const res = await fetch(`${API_BASE}/api/devices/${btn.dataset.id}`, { method: 'DELETE' });
+      const res = await fetch(`${API_BASE}/api/devices/${btn.dataset.id}`, {
+        method: 'DELETE',
+        headers: adminHeaders(channelId)
+      });
       if (!res.ok) alert('Remove failed');
       loadDevices();
     });
@@ -573,6 +599,31 @@ async function loadAnalytics() {
   });
 }
 
+function statusBadge(status) {
+  return `<span class="cmd-status cmd-${status}">${status}</span>`;
+}
+
+async function loadCommands() {
+  const body = document.getElementById('commandsBody');
+  try {
+    const commands = await getJson(`${API_BASE}/api/channels/${channelId}/commands`, { headers: adminHeaders(channelId) });
+    if (!Array.isArray(commands) || commands.length === 0) {
+      body.innerHTML = '<tr><td colspan="4" class="empty-state">No commands sent yet</td></tr>';
+      return;
+    }
+    body.innerHTML = commands.map((c) => `
+      <tr>
+        <td>${new Date(c.created_at).toLocaleString()}</td>
+        <td>${escapeHtml(c.device_id)}</td>
+        <td>${escapeHtml(c.command)}</td>
+        <td>${statusBadge(c.status)}</td>
+      </tr>
+    `).join('');
+  } catch (err) {
+    console.error('loadCommands failed:', err);
+  }
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
@@ -601,10 +652,11 @@ document.querySelectorAll('.copy-btn').forEach((btn) => {
 document.getElementById('settingsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
   const min_interval_seconds = document.getElementById('minInterval').value;
+  const is_public = document.getElementById('isPublic').checked;
   const res = await fetch(`${API_BASE}/api/channels/${channelId}`, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ min_interval_seconds })
+    headers: { 'Content-Type': 'application/json', ...adminHeaders(channelId) },
+    body: JSON.stringify({ min_interval_seconds, is_public })
   });
   if (!res.ok) {
     let message = 'Could not save settings';
@@ -617,6 +669,37 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
   }
   staleAfterMs = Math.max(60, Number(min_interval_seconds) * 3) * 1000;
   alert('Settings saved');
+});
+
+document.getElementById('commandForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const device_id = document.getElementById('commandDevice').value;
+  const command = document.getElementById('commandName').value.trim();
+  const payloadText = document.getElementById('commandPayload').value.trim();
+
+  let payload;
+  if (payloadText) {
+    try {
+      payload = JSON.parse(payloadText);
+    } catch {
+      alert('Payload must be valid JSON');
+      return;
+    }
+  }
+
+  const res = await fetch(`${API_BASE}/api/channels/${channelId}/commands`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...adminHeaders(channelId) },
+    body: JSON.stringify({ device_id, command, payload })
+  });
+
+  if (!res.ok) {
+    alert('Failed to send command');
+    return;
+  }
+  document.getElementById('commandName').value = '';
+  document.getElementById('commandPayload').value = '';
+  loadCommands();
 });
 
 document.getElementById('exportForm').addEventListener('submit', async (e) => {
@@ -663,7 +746,10 @@ document.getElementById('exportForm').addEventListener('submit', async (e) => {
 
 document.getElementById('clearBtn').addEventListener('click', async () => {
   if (!confirm('Clear all stored data for this channel?')) return;
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}/clear`, { method: 'POST' });
+  const res = await fetch(`${API_BASE}/api/channels/${channelId}/clear`, {
+    method: 'POST',
+    headers: adminHeaders(channelId)
+  });
   if (!res.ok) {
     alert('Clear failed');
     return;
@@ -674,7 +760,10 @@ document.getElementById('clearBtn').addEventListener('click', async () => {
 
 document.getElementById('deleteBtn').addEventListener('click', async () => {
   if (!confirm('Delete this channel permanently?')) return;
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}`, { method: 'DELETE' });
+  const res = await fetch(`${API_BASE}/api/channels/${channelId}`, {
+    method: 'DELETE',
+    headers: adminHeaders(channelId)
+  });
   if (!res.ok) {
     alert('Delete failed');
     return;
@@ -688,6 +777,7 @@ new MutationObserver(() => {
 }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
 setInterval(() => liveCards.forEach(refreshAge), 1000);
+setInterval(loadCommands, 5000);
 
 loadChannel()
   .then(() => {
@@ -695,6 +785,7 @@ loadChannel()
     loadFeeds();
     loadDevices();
     loadAnalytics();
+    loadCommands();
     connectWebSocket();
     setInterval(loadDevices, 10000);
     setInterval(loadAnalytics, 30000);
