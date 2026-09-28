@@ -8,7 +8,15 @@ const navCreateBtn = document.getElementById('navCreateBtn');
 const heroCreateBtn = document.getElementById('heroCreateBtn');
 const modalCloseBtn = document.getElementById('modalCloseBtn');
 
+const adminKeyBackdrop = document.getElementById('adminKeyBackdrop');
+const adminKeyValue = document.getElementById('adminKeyValue');
+const adminKeyCopyBtn = document.getElementById('adminKeyCopyBtn');
+const adminKeyDownloadBtn = document.getElementById('adminKeyDownloadBtn');
+const adminKeyConfirm = document.getElementById('adminKeyConfirm');
+const adminKeyContinueBtn = document.getElementById('adminKeyContinueBtn');
+
 const MAX_FIELDS = 20;
+let pendingChannelId = null;
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
@@ -47,6 +55,67 @@ addFieldBtn.addEventListener('click', () => {
   if (count + 1 >= MAX_FIELDS) addFieldBtn.disabled = true;
 });
 
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = document.createElement('textarea');
+    area.value = text;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    document.execCommand('copy');
+    area.remove();
+    return true;
+  }
+}
+
+function openAdminKeyModal(channel) {
+  pendingChannelId = channel.id;
+  adminKeyValue.textContent = channel.admin_key;
+  adminKeyConfirm.checked = false;
+  adminKeyContinueBtn.disabled = true;
+  adminKeyBackdrop.classList.add('open');
+}
+
+function goToPendingChannel() {
+  const id = pendingChannelId;
+  pendingChannelId = null;
+  adminKeyBackdrop.classList.remove('open');
+  window.location.href = `channel.html?id=${encodeURIComponent(id)}`;
+}
+
+adminKeyCopyBtn.addEventListener('click', async () => {
+  await copyText(adminKeyValue.textContent);
+  adminKeyCopyBtn.textContent = 'Copied';
+  setTimeout(() => { adminKeyCopyBtn.textContent = 'Copy'; }, 1200);
+});
+
+adminKeyDownloadBtn.addEventListener('click', () => {
+  const key = adminKeyValue.textContent;
+  const contents = `SarkitCloud admin key\nChannel ID: ${pendingChannelId}\nAdmin key: ${key}\n\nKeep this file safe. Anyone with this key can manage this channel.`;
+  const blob = new Blob([contents], { type: 'text/plain' });
+  const href = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = href;
+  link.download = `sarkited-channel-${pendingChannelId}-admin-key.txt`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(href), 1000);
+});
+
+adminKeyConfirm.addEventListener('change', () => {
+  adminKeyContinueBtn.disabled = !adminKeyConfirm.checked;
+});
+
+adminKeyContinueBtn.addEventListener('click', () => {
+  if (!adminKeyConfirm.checked) return;
+  goToPendingChannel();
+});
+
 channelForm.addEventListener('submit', async (e) => {
   e.preventDefault();
   const name = document.getElementById('name').value.trim();
@@ -72,12 +141,13 @@ channelForm.addEventListener('submit', async (e) => {
     return;
   }
 
-    const channel = await res.json();
+  const channel = await res.json();
   setAdminKey(channel.id, channel.admin_key);
-  alert(
-    `Channel created!\n\nSAVE THIS ADMIN KEY somewhere safe \u2014 it's your only way to manage this channel from another device/browser:\n\n${channel.admin_key}\n\nIt's already saved in this browser, but if you clear browser data or switch devices, you'll lose admin access unless you back it up.`
-  );
-  window.location.href = `channel.html?id=${encodeURIComponent(channel.id)}`;
+  closeModal();
+  channelForm.reset();
+  fieldsWrap.innerHTML = '<input type="text" class="fieldInput" placeholder="Field 1 name, e.g. temperature" required>';
+  addFieldBtn.disabled = false;
+  openAdminKeyModal(channel);
 });
 
 function statBox(value, label) {

@@ -226,7 +226,12 @@ async function loadChannel() {
     throw new Error('channel not found');
   }
   const ch = await res.json();
-  document.getElementById('unlockCard').hidden = Boolean(ch.write_api_key);
+  const isAdminView = Boolean(ch.write_api_key);
+  document.getElementById('unlockCard').hidden = isAdminView;
+  ['controlSection', 'settingsSection', 'dangerSection'].forEach((id) => {
+    const section = document.getElementById(id);
+    if (section) section.hidden = !isAdminView;
+  });
   document.getElementById('channelName').textContent = ch.name;
   document.getElementById('channelId').textContent = ch.id;
   document.getElementById('writeKey').textContent = ch.write_api_key || 'Hidden \u2014 open from the browser you created this channel in';
@@ -605,6 +610,7 @@ function statusBadge(status) {
 }
 
 async function loadCommands() {
+  if (!getAdminKey(channelId)) return;
   const body = document.getElementById('commandsBody');
   try {
     const commands = await getJson(`${API_BASE}/api/channels/${channelId}/commands`, { headers: adminHeaders(channelId) });

@@ -103,6 +103,27 @@
   </div>
 </div>
 
+<div class="modal-backdrop" id="adminKeyBackdrop">
+  <div class="modal">
+    <div class="modal-header">
+      <h2>Save your admin key</h2>
+    </div>
+    <div class="admin-key-body">
+      <p class="hint">This key is the <strong>only</strong> way to manage this channel from another device or browser &mdash; view its API keys, change settings, clear data, or delete it. It's already saved in this browser, but if you clear browser data or switch devices, you'll lose admin access unless you back it up now.</p>
+      <div class="id-row">
+        <span class="id-value" id="adminKeyValue"></span>
+        <button class="copy-btn" id="adminKeyCopyBtn">Copy</button>
+      </div>
+      <button type="button" class="btn btn-ghost" id="adminKeyDownloadBtn">Download as .txt</button>
+      <label class="checkbox-row">
+        <input type="checkbox" id="adminKeyConfirm">
+        I've saved this admin key somewhere safe
+      </label>
+      <button type="button" class="btn btn-accent" id="adminKeyContinueBtn" disabled>Continue to channel</button>
+    </div>
+  </div>
+</div>
+
 <script src="js/config.js"></script>
 <script src="js/onboarding.js"></script>
 <script src="js/home.js"></script>
