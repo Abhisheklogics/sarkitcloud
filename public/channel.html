@@ -57,6 +57,15 @@
     </div>
   </section>
 
+  <section class="card" id="unlockCard" hidden>
+    <h2>Admin access</h2>
+    <p class="hint">API keys and controls are hidden because this browser doesn't have this channel's admin key. Paste it below to unlock.</p>
+    <form id="unlockForm" class="settings-form">
+      <input type="password" id="unlockKey" placeholder="Admin key" required autocomplete="off">
+      <button type="submit" class="btn btn-accent">Unlock</button>
+    </form>
+  </section>
+
   <section class="card">
     <h2>API usage</h2>
     <div class="id-row">

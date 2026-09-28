@@ -226,6 +226,7 @@ async function loadChannel() {
     throw new Error('channel not found');
   }
   const ch = await res.json();
+  document.getElementById('unlockCard').hidden = Boolean(ch.write_api_key);
   document.getElementById('channelName').textContent = ch.name;
   document.getElementById('channelId').textContent = ch.id;
   document.getElementById('writeKey').textContent = ch.write_api_key || 'Hidden \u2014 open from the browser you created this channel in';
@@ -669,6 +670,24 @@ document.getElementById('settingsForm').addEventListener('submit', async (e) => 
   }
   staleAfterMs = Math.max(60, Number(min_interval_seconds) * 3) * 1000;
   alert('Settings saved');
+});
+
+document.getElementById('unlockForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const key = document.getElementById('unlockKey').value.trim();
+  if (!key) return;
+  try {
+    const res = await fetch(`${API_BASE}/api/channels/${channelId}`, { headers: { 'x-admin-key': key } });
+    const body = res.ok ? await res.json() : null;
+    if (!body || !body.write_api_key) {
+      alert('Invalid admin key');
+      return;
+    }
+    setAdminKey(channelId, key);
+    window.location.reload();
+  } catch {
+    alert('Could not verify the key. Try again.');
+  }
 });
 
 document.getElementById('commandForm').addEventListener('submit', async (e) => {
