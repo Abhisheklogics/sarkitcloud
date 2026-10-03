@@ -115,7 +115,7 @@ router.post('/', requireUser, limits.createChannel, asyncHandler(async (req, res
     description,
     write_api_key: generateKey(),
     read_api_key: generateKey(),
-    min_interval_seconds: 1,
+   min_interval_seconds: 15,
     retention_days: config.defaultRetentionDays,
     is_public: false,
   };
