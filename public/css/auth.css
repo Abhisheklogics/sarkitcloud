@@ -1,0 +1,77 @@
+[hidden] {
+  display: none !important;
+}
+
+.auth-wrap {
+  max-width: 420px;
+  margin: 48px auto;
+  padding: 0 24px;
+}
+
+.auth-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+
+.auth-tabs .btn {
+  flex: 1;
+  justify-content: center;
+}
+
+.auth-tabs .btn.is-active {
+  background: var(--accent);
+  color: #ffffff;
+  border-color: var(--accent);
+}
+
+.form-msg {
+  font-size: 13px;
+  min-height: 18px;
+  margin: 0;
+}
+
+.form-msg.is-error {
+  color: var(--danger);
+}
+
+.form-msg.is-ok {
+  color: var(--success);
+}
+
+.link-btn {
+  background: none;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+  align-self: flex-start;
+}
+
+.user-email {
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.hero-copy p {
+  text-align: justify;
+}
+
+.divider {
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 12px;
+  margin: 14px 0;
+}
+
+.btn-full {
+  width: 100%;
+  justify-content: center;
+}
+
+.auth-note {
+  font-size: 13px;
+  color: var(--text-muted);
+  margin: 0 0 14px;
+}

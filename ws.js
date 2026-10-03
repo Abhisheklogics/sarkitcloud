@@ -1,13 +1,17 @@
 const { WebSocketServer } = require('ws');
-const crypto = require('crypto');
+const config = require('./config');
 const supabase = require('./supabaseClient');
+const { verifyToken } = require('./middleware/auth');
 
 const rooms = new Map();
-const HEARTBEAT_INTERVAL = 30000;
+const HEARTBEAT_MS = 30000;
+const AUTH_TIMEOUT_MS = 5000;
+let wss = null;
 
 function originAllowed(req) {
   const origin = req.headers.origin;
   if (!origin) return true;
+  if (config.allowedOrigins.length > 0) return config.allowedOrigins.includes(origin);
   try {
     return new URL(origin).host === req.headers.host;
   } catch {
@@ -15,27 +19,46 @@ function originAllowed(req) {
   }
 }
 
-function safeEqual(a, b) {
-  const left = Buffer.from(String(a || ''));
-  const right = Buffer.from(String(b || ''));
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
+function send(socket, payload) {
+  if (socket.readyState === 1) socket.send(JSON.stringify(payload));
 }
 
-async function channelAllowsConnection(channelIdRaw, adminKey) {
-  const id = Number(channelIdRaw);
-  if (!Number.isInteger(id)) return false;
-  const { data: channel, error } = await supabase
+async function loadChannel(id) {
+  const { data, error } = await supabase
     .from('channels')
-    .select('is_public, admin_key')
+    .select('id,is_public,owner_id')
     .eq('id', id)
-    .single();
-  if (error || !channel) return false;
-  if (channel.is_public !== false) return true;
-  return Boolean(adminKey) && safeEqual(channel.admin_key, adminKey);
+    .maybeSingle();
+  if (error) throw error;
+  return data || null;
+}
+
+function join(socket, channelId) {
+  let room = rooms.get(channelId);
+  if (!room) {
+    room = new Set();
+    rooms.set(channelId, room);
+  }
+  if (room.size >= config.wsMaxPerChannel) {
+    socket.close(1013, 'channel is full');
+    return false;
+  }
+  room.add(socket);
+  socket.joined = true;
+  send(socket, { type: 'ready', owner: socket.owner });
+  return true;
+}
+
+function leave(socket) {
+  if (!socket.joined) return;
+  const room = rooms.get(socket.channelId);
+  if (!room) return;
+  room.delete(socket);
+  if (room.size === 0) rooms.delete(socket.channelId);
 }
 
 function setup(server) {
-  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 1024 });
+  wss = new WebSocketServer({ server, path: '/ws', maxPayload: 4096 });
 
   const heartbeat = setInterval(() => {
     wss.clients.forEach((socket) => {
@@ -46,62 +69,114 @@ function setup(server) {
       socket.isAlive = false;
       socket.ping();
     });
-  }, HEARTBEAT_INTERVAL);
-
+  }, HEARTBEAT_MS);
+  heartbeat.unref();
   wss.on('close', () => clearInterval(heartbeat));
 
-  wss.on('connection', async (socket, req) => {
+  wss.on('connection', (socket, req) => {
+    socket.isAlive = true;
+    socket.joined = false;
+    socket.owner = false;
+    socket.channelId = 0;
+    socket.on('pong', () => {
+      socket.isAlive = true;
+    });
+    socket.on('error', () => {});
+
     if (!originAllowed(req)) {
       socket.close(1008, 'bad origin');
       return;
     }
 
     const url = new URL(req.url, 'http://localhost');
-    const channelId = url.searchParams.get('channel');
-    const adminKey = url.searchParams.get('admin_key');
-    if (!channelId) {
-      socket.close();
+    const channelId = Number(url.searchParams.get('channel'));
+    if (!Number.isSafeInteger(channelId) || channelId < 1) {
+      socket.close(1008, 'invalid channel');
       return;
     }
+    socket.channelId = channelId;
 
-    let allowed = false;
-    try {
-      allowed = await channelAllowsConnection(channelId, adminKey);
-    } catch (err) {
-      console.error('ws channel check crashed:', err);
-    }
-    if (!allowed) {
-      socket.close(1008, 'unauthorized');
-      return;
-    }
-
-    socket.isAlive = true;
-    socket.on('pong', () => {
-      socket.isAlive = true;
+    const channelPromise = loadChannel(channelId).catch((err) => {
+      console.error('ws channel lookup failed:', err.message || err);
+      return null;
     });
 
-    if (!rooms.has(channelId)) rooms.set(channelId, new Set());
-    rooms.get(channelId).add(socket);
+    const authTimer = setTimeout(() => {
+      if (!socket.joined) socket.close(1008, 'auth required');
+    }, AUTH_TIMEOUT_MS);
+
+    socket.on('message', async (raw) => {
+      if (socket.owner) return;
+      let message;
+      try {
+        message = JSON.parse(raw.toString());
+      } catch {
+        return;
+      }
+      if (!message || message.type !== 'auth' || typeof message.token !== 'string') return;
+      const channel = await channelPromise;
+      if (!channel) return;
+      let user = null;
+      try {
+        user = await verifyToken(message.token);
+      } catch {
+        user = null;
+      }
+      if (!user || user.id !== channel.owner_id) {
+        if (!socket.joined) socket.close(1008, 'unauthorized');
+        return;
+      }
+      socket.owner = true;
+      if (socket.joined) send(socket, { type: 'ready', owner: true });
+      else join(socket, channelId);
+    });
 
     socket.on('close', () => {
-      const set = rooms.get(channelId);
-      if (set) {
-        set.delete(socket);
-        if (set.size === 0) rooms.delete(channelId);
+      clearTimeout(authTimer);
+      leave(socket);
+    });
+
+    channelPromise.then((channel) => {
+      if (socket.readyState !== 1) return;
+      if (!channel) {
+        socket.close(1008, 'channel not found');
+        return;
       }
+      if (channel.is_public && !socket.joined) join(socket, channelId);
     });
   });
 
   return wss;
 }
 
-function broadcast(channelId, payload) {
-  const set = rooms.get(String(channelId));
-  if (!set || set.size === 0) return;
+function broadcast(channelId, payload, ownerOnly) {
+  const room = rooms.get(Number(channelId));
+  if (!room || room.size === 0) return;
   const message = JSON.stringify(payload);
-  set.forEach((socket) => {
-    if (socket.readyState === 1) socket.send(message);
+  room.forEach((socket) => {
+    if (socket.readyState !== 1) return;
+    if (ownerOnly && !socket.owner) return;
+    socket.send(message);
   });
 }
 
-module.exports = { setup, broadcast };
+function disconnectChannel(channelId, code, reason) {
+  const room = rooms.get(Number(channelId));
+  if (!room) return;
+  [...room].forEach((socket) => socket.close(code || 1000, reason || 'closed'));
+}
+
+function dropNonOwners(channelId) {
+  const room = rooms.get(Number(channelId));
+  if (!room) return;
+  [...room].forEach((socket) => {
+    if (!socket.owner) socket.close(1008, 'channel is private');
+  });
+}
+
+function shutdown() {
+  if (!wss) return;
+  wss.clients.forEach((socket) => socket.close(1001, 'server restarting'));
+}
+
+module.exports = { setup, broadcast, disconnectChannel, dropNonOwners, shutdown };

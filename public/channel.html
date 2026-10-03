@@ -4,17 +4,20 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Channel &mdash; SarkitCloud</title>
+<meta name="robots" content="noindex, nofollow">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css?v=4">
-<link rel="stylesheet" href="css/channel-extra.css?v=1">
-<script src="js/theme.js?v=3"></script>
+<link rel="stylesheet" href="/css/style.css?v=4">
+<link rel="stylesheet" href="/css/channel-extra.css?v=1">
+<link rel="stylesheet" href="/css/auth.css?v=1">
+<script src="/js/theme.js?v=3"></script>
 </head>
 <body>
 
 <nav class="nav">
-  <a href="index.html" class="nav-brand">
+  <a href="/" class="nav-brand">
     <svg class="nav-logo" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect x="9" y="9" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
       <circle cx="14" cy="14" r="2" fill="currentColor"/>
@@ -32,89 +35,100 @@
         <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
       </svg>
     </button>
-    <a href="index.html" class="btn btn-ghost">&larr; All channels</a>
+    <a href="/" class="btn btn-ghost">&larr; All channels</a>
+    <button type="button" class="btn btn-ghost" id="logoutBtn" hidden>Sign out</button>
   </div>
 </nav>
 
 <main class="container channel-page">
   <h1 id="channelName" class="page-title">Channel</h1>
+  <p class="hint" id="status">Loading...</p>
 
-  <section class="card">
+  <section class="card" id="loginCard" hidden>
+    <h2>Login required</h2>
+    <p class="hint">This channel is private. Sign in with the account that owns it.</p>
+    <a class="btn btn-accent" id="loginLink" href="/login">Sign in</a>
+  </section>
+
+  <section class="card" id="errorCard" hidden>
+    <h2>Cannot open channel</h2>
+    <p class="hint" id="errorText"></p>
+  </section>
+
+  <section class="card" id="detailsCard" hidden>
     <h2>Channel details</h2>
     <div class="id-row">
       <span class="id-label">Channel ID</span>
       <span class="id-value" id="channelId"></span>
     </div>
-    <div class="id-row">
-      <span class="id-label">Write API key</span>
-      <span class="id-value" id="writeKey"></span>
-      <button class="copy-btn" data-copy-target="writeKey">Copy</button>
-    </div>
-    <div class="id-row">
-      <span class="id-label">Read API key</span>
-      <span class="id-value" id="readKey"></span>
-      <button class="copy-btn" data-copy-target="readKey">Copy</button>
+    <div id="keyRows" hidden>
+      <div class="id-row">
+        <span class="id-label">Write API key</span>
+        <span class="id-value" id="writeKey"></span>
+        <button type="button" class="copy-btn" data-copy-target="writeKey">Copy</button>
+      </div>
+      <div class="id-row">
+        <span class="id-label">Read API key</span>
+        <span class="id-value" id="readKey"></span>
+        <button type="button" class="copy-btn" data-copy-target="readKey">Copy</button>
+      </div>
     </div>
   </section>
 
-  <section class="card" id="unlockCard" hidden>
-    <h2>Admin access</h2>
-    <p class="hint">API keys and controls are hidden because this browser doesn't have this channel's admin key. Paste it below to unlock.</p>
-    <form id="unlockForm" class="settings-form">
-      <input type="password" id="unlockKey" placeholder="Admin key" required autocomplete="off">
-      <button type="submit" class="btn btn-accent">Unlock</button>
-    </form>
-  </section>
-
-  <section class="card">
+  <section class="card" id="apiCard" hidden>
     <h2>API usage</h2>
     <div class="id-row">
       <span class="id-label">Write URL (POST)</span>
       <span class="id-value" id="apiWriteUrl"></span>
-      <button class="copy-btn" data-copy-target="apiWriteUrl">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="apiWriteUrl">Copy</button>
     </div>
     <div class="id-row">
       <span class="id-label">Write body</span>
       <span class="id-value" id="apiWriteBody"></span>
-      <button class="copy-btn" data-copy-target="apiWriteBody">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="apiWriteBody">Copy</button>
     </div>
     <div class="id-row">
       <span class="id-label">Write (GET)</span>
       <span class="id-value" id="apiWriteGet"></span>
-      <button class="copy-btn" data-copy-target="apiWriteGet">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="apiWriteGet">Copy</button>
     </div>
-    <p class="hint">The three lines above (Write URL, Write body, Write GET) are different ways to achieve the same result&mdash;simply copy the line that matches the method your ESP32, Arduino, or simulator code uses (whether it's via the URL, POST body, or form data). You only need to use one of them, not all three.</p>
+    <p class="hint">Use only one of the three write forms. POST with the key in an <code>x-api-key</code> header is the safest. Replies: entry id on success, <code>0</code> with HTTP 429 if the minimum interval has not passed.</p>
+    <div class="id-row">
+      <span class="id-label">Bulk write (POST JSON)</span>
+      <span class="id-value" id="apiBulk"></span>
+      <button type="button" class="copy-btn" data-copy-target="apiBulk">Copy</button>
+    </div>
+    <p class="hint">Body: <code>{"api_key":"...","updates":[{"device_id":"d1","created_at":"2026-01-01T00:00:00Z","field1":1}]}</code>. Always send <code>created_at</code> so retries never create duplicates.</p>
     <div class="id-row">
       <span class="id-label">Read last value</span>
       <span class="id-value" id="apiReadLast"></span>
-      <button class="copy-btn" data-copy-target="apiReadLast">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="apiReadLast">Copy</button>
     </div>
     <div class="id-row">
       <span class="id-label">Read (no channel ID)</span>
       <span class="id-value" id="apiRead"></span>
-      <button class="copy-btn" data-copy-target="apiRead">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="apiRead">Copy</button>
     </div>
     <div class="id-row">
       <span class="id-label">Read CSV</span>
       <span class="id-value" id="apiCsv"></span>
-      <button class="copy-btn" data-copy-target="apiCsv">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="apiCsv">Copy</button>
     </div>
     <div class="id-row">
-      <span class="id-label">Poll commands (JSON, needs ArduinoJson)</span>
-      <span class="id-value" id="apiCommandJson"></span>
-      <button class="copy-btn" data-copy-target="apiCommandJson">Copy</button>
-    </div>
-    <div class="id-row">
-      <span class="id-label">Poll commands (plain text, no library)</span>
+      <span class="id-label">Poll commands (plain text)</span>
       <span class="id-value" id="apiCommandText"></span>
-      <button class="copy-btn" data-copy-target="apiCommandText">Copy</button>
+      <button type="button" class="copy-btn" data-copy-target="apiCommandText">Copy</button>
     </div>
-    <p class="hint">All three are useful when you need to restore your data.<strong>Somewhere else</strong> If he/she has to do it &mdash; For instance, if you want to display sensor values ​​on your own website or app, or download the full history as a CSV file. If you are only viewing the data on this dashboard, then these aren't necessary.</p>
-    <p class="hint">On a real device, replace localhost with your PC's LAN IP or your live domain. On https domains leave out the port. Only api_key and device_id matter &mdash; no channel ID needed to write.</p>
+    <div class="id-row">
+      <span class="id-label">Acknowledge command</span>
+      <span class="id-value" id="apiAck"></span>
+      <button type="button" class="copy-btn" data-copy-target="apiAck">Copy</button>
+    </div>
+    <p class="hint">Command lines look like <code>id|COMMAND|payload</code>. Acknowledge each one, otherwise it is redelivered up to 5 times. Add <code>&amp;format=json</code> instead of <code>format=text</code> for JSON. Use <code>https://</code>; plain http is redirected and most ESP clients do not follow redirects.</p>
   </section>
 
-  <section class="card">
-    <h2>Analytics</h2>
+  <section class="card" id="analyticsCard" hidden>
+    <h2>Analytics <span class="hint">(last 7 days, UTC)</span></h2>
     <div class="analytics-stats">
       <div class="stat-box"><span class="stat-value" id="statTotalEntries">0</span><span class="stat-label">Total entries</span></div>
       <div class="stat-box"><span class="stat-value" id="statEntriesToday">0</span><span class="stat-label">Entries today</span></div>
@@ -123,42 +137,44 @@
     <canvas id="analyticsChart" height="90"></canvas>
   </section>
 
-  <section class="card">
-    <h2>Live values <span class="live-indicator">real-time</span></h2>
+  <section class="card" id="liveCard" hidden>
+    <h2>Live values <span class="live-indicator" id="liveIndicator">connecting</span></h2>
     <div id="liveValues" class="devices-live-grid"></div>
   </section>
 
-  <section class="card">
+  <section class="card" id="devicesCard" hidden>
     <h2>Devices</h2>
     <div id="devicesList" class="devices-list"></div>
   </section>
 
-  <section class="card" id="controlSection">
+  <section class="card" id="controlCard" hidden>
     <h2>Device control</h2>
     <form id="commandForm" class="settings-form">
       <label for="commandDevice">Target device</label>
       <select id="commandDevice">
         <option value="all">All devices</option>
       </select>
-      <label for="commandName">Command</label>
+      <label for="commandName">Command (letters, digits, _ . : -)</label>
       <input type="text" id="commandName" maxlength="60" placeholder="e.g. LED_ON, RELAY_TOGGLE" required>
       <label for="commandPayload">Payload (optional JSON)</label>
       <input type="text" id="commandPayload" placeholder='e.g. {"duration_ms": 3000}'>
       <button type="submit" class="btn btn-accent">Send command</button>
     </form>
     <div class="table-scroll">
-      <table id="commandsTable">
+      <table>
         <thead><tr><th>Time</th><th>Device</th><th>Command</th><th>Status</th></tr></thead>
         <tbody id="commandsBody"></tbody>
       </table>
     </div>
   </section>
 
-  <section class="card" id="settingsSection">
+  <section class="card" id="settingsCard" hidden>
     <h2>Channel settings</h2>
     <form id="settingsForm" class="settings-form">
       <label for="minInterval">Minimum interval between stored entries (seconds)</label>
       <input type="number" id="minInterval" min="1" max="3600">
+      <label for="retentionDays">Keep data for (days)</label>
+      <input type="number" id="retentionDays" min="1">
       <label class="checkbox-row">
         <input type="checkbox" id="isPublic">
         Public channel (anyone with the link can view charts and live data)
@@ -167,12 +183,12 @@
     </form>
   </section>
 
-  <section class="card">
+  <section class="card" id="chartsCard" hidden>
     <h2>Charts</h2>
     <div id="chartsWrap" class="charts-grid"></div>
   </section>
 
-  <section class="card">
+  <section class="card" id="exportCard" hidden>
     <h2>Export data</h2>
     <form id="exportForm" class="export-form">
       <div class="export-grid">
@@ -192,27 +208,29 @@
     </form>
   </section>
 
-  <section class="card">
+  <section class="card" id="feedsCard" hidden>
     <h2>Recent stored entries</h2>
     <div class="table-scroll">
-      <table id="feedsTable">
+      <table>
         <thead><tr id="feedsHeader"></tr></thead>
         <tbody id="feedsBody"></tbody>
       </table>
     </div>
   </section>
 
-  <section class="card danger" id="dangerSection">
+  <section class="card danger" id="dangerCard" hidden>
     <h2>Danger zone</h2>
     <div class="danger-actions">
-      <button id="clearBtn" class="btn btn-danger-outline">Clear data</button>
-      <button id="deleteBtn" class="btn btn-danger">Delete channel</button>
+      <button type="button" id="rotateBtn" class="btn btn-danger-outline">Regenerate API keys</button>
+      <button type="button" id="clearBtn" class="btn btn-danger-outline">Clear data</button>
+      <button type="button" id="deleteBtn" class="btn btn-danger">Delete channel</button>
     </div>
   </section>
 </main>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
-<script src="js/config.js"></script>
-<script src="js/channel.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="/js/config.js"></script>
+<script src="/js/channel.js"></script>
 </body>
 </html>

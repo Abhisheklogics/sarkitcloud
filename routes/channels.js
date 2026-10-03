@@ -1,350 +1,436 @@
 const express = require('express');
-const crypto = require('crypto');
-const rateLimit = require('express-rate-limit');
+const config = require('../config');
 const supabase = require('../supabaseClient');
-const generateApiKey = require('../utils/generateApiKey');
-const liveCache = require('../liveCache');
-const {
-  parseFeedFilters,
-  clampRows,
-  buildFeedQuery,
-  handleCsvExport,
-} = require('../utils/feedsExport');
+const live = require('../utils/live');
+const devices = require('../utils/devices');
+const ws = require('../ws');
+const channelStore = require('../utils/channelStore');
+const { generateKey } = require('../utils/keys');
+const { asyncHandler, HttpError, parseId } = require('../utils/http');
+const { parseFilters, clampInt, sanitizeDeviceId } = require('../utils/parse');
+const { buildFeedQuery } = require('../utils/feeds');
+const { streamCsv } = require('../utils/csv');
+const { requireUser, loadOwnedChannel, loadViewableChannel } = require('../middleware/auth');
+const limits = require('../middleware/limits');
 
 const router = express.Router();
+const owned = [requireUser, loadOwnedChannel];
 
-const FIELD_COUNT = 20;
-const MAX_NAME_LENGTH = 60;
-const MAX_DESCRIPTION_LENGTH = 200;
-const MAX_FIELD_LABEL_LENGTH = 60;
-const DEFAULT_MIN_INTERVAL = 1;
-const MAX_MIN_INTERVAL = 3600;
-const NOT_FOUND_CODE = 'PGRST116';
-const DEVICE_STALE_MULTIPLIER = 3;
+const MAX_NAME = 60;
+const MAX_DESCRIPTION = 200;
+const MAX_LABEL = 60;
+const COMMAND_NAME_RE = /^[A-Za-z0-9_.:-]{1,60}$/;
+const MAX_PAYLOAD_JSON = 2000;
+const MAX_PENDING_COMMANDS = 200;
 const DEFAULT_STALE_SECONDS = 60;
-const MAX_COMMAND_LENGTH = 60;
-const MAX_COMMANDS_LIST = 50;
-const MAX_PAYLOAD_JSON_LENGTH = 2000;
+const STALE_MULTIPLIER = 3;
 
-const exportLimiter = rateLimit({
-  windowMs: 60 * 1000,
-  max: 10,
-  standardHeaders: true,
-  legacyHeaders: false,
-});
+function bodyOf(req) {
+  return req.body && typeof req.body === 'object' && !Array.isArray(req.body) ? req.body : {};
+}
 
-function guard(handler) {
-  return async (req, res) => {
-    try {
-      await handler(req, res);
-    } catch (err) {
-      console.error(`${req.method} ${req.path} crashed:`, err);
-      if (!res.headersSent) res.status(500).json({ error: 'internal server error' });
-    }
+function cleanLabel(value) {
+  if (value === null || value === undefined) return null;
+  const text = String(value).trim().slice(0, MAX_LABEL);
+  return text || null;
+}
+
+function toPublic(channel, owner) {
+  const out = {
+    id: channel.id,
+    name: channel.name,
+    description: channel.description,
+    is_public: channel.is_public,
+    min_interval_seconds: channel.min_interval_seconds,
+    retention_days: channel.retention_days,
+    created_at: channel.created_at,
+    is_owner: owner,
   };
-}
-
-function parseChannelId(req, res) {
-  const id = Number(req.params.id);
-  if (!Number.isInteger(id)) {
-    res.status(400).json({ error: 'invalid channel id' });
-    return null;
-  }
-  return id;
-}
-
-async function fetchChannel(id) {
-  const { data, error } = await supabase.from('channels').select('*').eq('id', id).single();
-  if (error && error.code !== NOT_FOUND_CODE) throw error;
-  return data || null;
-}
-
-function safeEqual(a, b) {
-  const left = Buffer.from(String(a || ''));
-  const right = Buffer.from(String(b || ''));
-  return left.length === right.length && crypto.timingSafeEqual(left, right);
-}
-
-function isAdmin(req, channel) {
-  const key = req.get('x-admin-key');
-  return Boolean(key) && safeEqual(channel.admin_key, key);
-}
-
-function canView(req, channel) {
-  return channel.is_public !== false || isAdmin(req, channel);
-}
-
-function stripSecrets(channel, admin) {
-  const { admin_key, write_api_key, read_api_key, ...publicFields } = channel;
-  if (!admin) return publicFields;
-  return { ...publicFields, write_api_key, read_api_key };
-}
-
-async function requireAdmin(req, res, next) {
-  const id = parseChannelId(req, res);
-  if (id === null) return;
-  const channel = await fetchChannel(id);
-  if (!channel) return res.status(404).json({ error: 'channel not found' });
-  if (!isAdmin(req, channel)) return res.status(403).json({ error: 'invalid admin key' });
-  req.channel = channel;
-  next();
-}
-
-async function loadViewableChannel(req, res) {
-  const id = parseChannelId(req, res);
-  if (id === null) return null;
-  const channel = await fetchChannel(id);
-  if (!channel) {
-    res.status(404).json({ error: 'channel not found' });
-    return null;
-  }
-  if (!canView(req, channel)) {
-    res.status(403).json({ error: 'this channel is private' });
-    return null;
-  }
-  return channel;
-}
-
-router.get('/summary', guard(async (req, res) => {
-  const [channels, devices, entries] = await Promise.all([
-    supabase.from('channels').select('id', { count: 'exact', head: true }),
-    supabase.from('devices').select('id', { count: 'exact', head: true }),
-    supabase.from('feeds').select('id', { count: 'exact', head: true }),
-  ]);
-  const failed = [channels, devices, entries].find((r) => r.error);
-  if (failed) throw failed.error;
-  res.json({
-    channels: channels.count || 0,
-    devices: devices.count || 0,
-    entries: entries.count || 0,
+  config.fieldKeys.forEach((key) => {
+    out[key] = channel[key] ?? null;
   });
-}));
+  if (owner) {
+    out.write_api_key = channel.write_api_key;
+    out.read_api_key = channel.read_api_key;
+  }
+  return out;
+}
 
-router.get('/', guard(async (req, res) => {
-  const { data: channels, error } = await supabase
+function activeFieldCount(channel) {
+  return config.fieldKeys.filter((key) => channel[key]).length;
+}
+
+router.get('/', requireUser, asyncHandler(async (req, res) => {
+  const { data, error } = await supabase
     .from('channels')
     .select('*')
-    .eq('is_public', true)
-    .order('created_at', { ascending: false });
+    .eq('owner_id', req.user.id)
+    .order('created_at', { ascending: false })
+    .limit(200);
   if (error) throw error;
 
-  const withCounts = await Promise.all(
-    channels.map(async (ch) => {
-      const [devices, entries] = await Promise.all([
-        supabase.from('devices').select('id', { count: 'exact', head: true }).eq('channel_id', ch.id),
-        supabase.from('feeds').select('id', { count: 'exact', head: true }).eq('channel_id', ch.id),
-      ]);
-      return {
-        id: ch.id,
-        name: ch.name,
-        description: ch.description,
-        device_count: devices.count || 0,
-        entries_count: entries.count || 0,
-      };
-    })
-  );
-  res.json(withCounts);
+  const overview = new Map();
+  if (data.length > 0) {
+    const { data: rows, error: overviewError } = await supabase.rpc('channel_overview', {
+      p_ids: data.map((c) => c.id),
+    });
+    if (overviewError) throw overviewError;
+    rows.forEach((row) => overview.set(Number(row.channel_id), row));
+  }
+
+  res.json(data.map((channel) => {
+    const info = overview.get(channel.id) || {};
+    return {
+      ...toPublic(channel, true),
+      entries_count: Number(info.total_entries) || 0,
+      device_count: Number(info.device_count) || 0,
+    };
+  }));
 }));
 
-router.post('/', guard(async (req, res) => {
-  const body = req.body || {};
-  const name = String(body.name || '').trim().slice(0, MAX_NAME_LENGTH);
-  const description = String(body.description || '').trim().slice(0, MAX_DESCRIPTION_LENGTH);
-  const fields = Array.isArray(body.fields) ? body.fields : [];
-  const cleanFields = fields
-    .map((f) => String(f || '').trim().slice(0, MAX_FIELD_LABEL_LENGTH))
-    .filter((f) => f.length > 0)
-    .slice(0, FIELD_COUNT);
+router.post('/', requireUser, limits.createChannel, asyncHandler(async (req, res) => {
+  const body = bodyOf(req);
+  const name = String(body.name || '').trim().slice(0, MAX_NAME);
+  const description = String(body.description || '').trim().slice(0, MAX_DESCRIPTION);
+  const labels = (Array.isArray(body.fields) ? body.fields : [])
+    .map(cleanLabel)
+    .filter(Boolean)
+    .slice(0, config.fieldCount);
 
-  if (!name) return res.status(400).json({ error: 'name is required' });
-  if (cleanFields.length === 0) return res.status(400).json({ error: 'at least one field is required' });
+  if (!name) throw new HttpError(400, 'name is required');
+  if (labels.length === 0) throw new HttpError(400, 'at least one field is required');
 
-  const insertPayload = {
+  const { count, error: countError } = await supabase
+    .from('channels')
+    .select('id', { count: 'exact', head: true })
+    .eq('owner_id', req.user.id);
+  if (countError) throw countError;
+  if ((count || 0) >= config.maxChannelsPerUser) {
+    throw new HttpError(403, `channel limit reached (${config.maxChannelsPerUser})`);
+  }
+
+  const payload = {
+    owner_id: req.user.id,
     name,
     description,
-    write_api_key: generateApiKey(),
-    read_api_key: generateApiKey(),
-    admin_key: generateApiKey(),
-    min_interval_seconds: DEFAULT_MIN_INTERVAL,
-    is_public: true,
+    write_api_key: generateKey(),
+    read_api_key: generateKey(),
+    min_interval_seconds: 1,
+    retention_days: config.defaultRetentionDays,
+    is_public: false,
   };
-  cleanFields.forEach((label, i) => {
-    insertPayload[`field${i + 1}`] = label;
+  labels.forEach((label, index) => {
+    payload[`field${index + 1}`] = label;
   });
 
-  const { data, error } = await supabase.from('channels').insert(insertPayload).select().single();
+  const { data, error } = await supabase.from('channels').insert(payload).select('*').single();
   if (error) throw error;
-  res.status(201).json(data);
+  res.status(201).json(toPublic(data, true));
 }));
 
-router.get('/:id', guard(async (req, res) => {
-  const channel = await loadViewableChannel(req, res);
-  if (!channel) return;
-  res.json(stripSecrets(channel, isAdmin(req, channel)));
-}));
+router.get('/:id', loadViewableChannel, (req, res) => {
+  res.json(toPublic(req.channel, req.isOwner));
+});
 
-router.patch('/:id', requireAdmin, guard(async (req, res) => {
-  const id = req.channel.id;
-  const body = req.body || {};
+router.patch('/:id', ...owned, asyncHandler(async (req, res) => {
+  const body = bodyOf(req);
   const updates = {};
 
-  if (body.min_interval_seconds !== undefined) {
-    const interval = Number(body.min_interval_seconds);
-    if (!Number.isInteger(interval) || interval < 1 || interval > MAX_MIN_INTERVAL) {
-      return res.status(400).json({ error: 'min_interval_seconds must be an integer from 1 to 3600' });
-    }
-    updates.min_interval_seconds = interval;
-  }
   if (body.name !== undefined) {
-    const name = String(body.name).trim().slice(0, MAX_NAME_LENGTH);
-    if (!name) return res.status(400).json({ error: 'name cannot be empty' });
+    const name = String(body.name).trim().slice(0, MAX_NAME);
+    if (!name) throw new HttpError(400, 'name cannot be empty');
     updates.name = name;
   }
   if (body.description !== undefined) {
-    updates.description = String(body.description).trim().slice(0, MAX_DESCRIPTION_LENGTH);
+    updates.description = String(body.description).trim().slice(0, MAX_DESCRIPTION);
   }
-  if (body.is_public !== undefined) {
-    updates.is_public = Boolean(body.is_public);
+  if (body.is_public !== undefined) updates.is_public = Boolean(body.is_public);
+  if (body.min_interval_seconds !== undefined) {
+    const value = Number(body.min_interval_seconds);
+    if (!Number.isInteger(value) || value < 1 || value > 3600) {
+      throw new HttpError(400, 'min_interval_seconds must be an integer from 1 to 3600');
+    }
+    updates.min_interval_seconds = value;
   }
-  if (Object.keys(updates).length === 0) return res.status(400).json({ error: 'no valid fields to update' });
+  if (body.retention_days !== undefined) {
+    const value = Number(body.retention_days);
+    if (!Number.isInteger(value) || value < 1 || value > config.maxRetentionDays) {
+      throw new HttpError(400, `retention_days must be an integer from 1 to ${config.maxRetentionDays}`);
+    }
+    updates.retention_days = value;
+  }
+  if (body.fields && typeof body.fields === 'object' && !Array.isArray(body.fields)) {
+    const merged = { ...req.channel };
+    config.fieldKeys.forEach((key) => {
+      if (body.fields[key] === undefined) return;
+      updates[key] = cleanLabel(body.fields[key]);
+      merged[key] = updates[key];
+    });
+    if (activeFieldCount(merged) === 0) throw new HttpError(400, 'at least one field is required');
+  }
+  if (Object.keys(updates).length === 0) throw new HttpError(400, 'no valid fields to update');
 
-  const { data, error } = await supabase.from('channels').update(updates).eq('id', id).select().single();
-  if (error && error.code !== NOT_FOUND_CODE) throw error;
-  if (!data) return res.status(404).json({ error: 'channel not found' });
-  res.json(stripSecrets(data, true));
+  const { data, error } = await supabase
+    .from('channels')
+    .update(updates)
+    .eq('id', req.channel.id)
+    .eq('owner_id', req.user.id)
+    .select('*')
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new HttpError(404, 'channel not found');
+
+  channelStore.invalidate();
+  if (updates.is_public === false) ws.dropNonOwners(data.id);
+  res.json(toPublic(data, true));
 }));
 
-router.delete('/:id', requireAdmin, guard(async (req, res) => {
-  const { error } = await supabase.from('channels').delete().eq('id', req.channel.id);
+router.post('/:id/rotate-keys', ...owned, asyncHandler(async (req, res) => {
+  const which = String(bodyOf(req).which || 'both');
+  if (!['write', 'read', 'both'].includes(which)) throw new HttpError(400, 'which must be write, read or both');
+  const updates = {};
+  if (which === 'write' || which === 'both') updates.write_api_key = generateKey();
+  if (which === 'read' || which === 'both') updates.read_api_key = generateKey();
+
+  const { data, error } = await supabase
+    .from('channels')
+    .update(updates)
+    .eq('id', req.channel.id)
+    .eq('owner_id', req.user.id)
+    .select('*')
+    .maybeSingle();
   if (error) throw error;
+  if (!data) throw new HttpError(404, 'channel not found');
+  channelStore.invalidate();
+  res.json(toPublic(data, true));
+}));
+
+router.delete('/:id', ...owned, asyncHandler(async (req, res) => {
+  const id = req.channel.id;
+  const { error } = await supabase.from('channels').delete().eq('id', id).eq('owner_id', req.user.id);
+  if (error) throw error;
+  live.clearChannel(id);
+  devices.forgetChannel(id);
+  channelStore.invalidate();
+  ws.disconnectChannel(id, 1000, 'channel deleted');
   res.json({ ok: true });
 }));
 
-router.get('/:id/live', guard(async (req, res) => {
-  const channel = await loadViewableChannel(req, res);
-  if (!channel) return;
-  res.json({ devices: liveCache.getLive(channel.id) });
+router.post('/:id/clear', ...owned, asyncHandler(async (req, res) => {
+  const id = req.channel.id;
+  const feeds = await supabase.from('feeds').delete().eq('channel_id', id);
+  if (feeds.error) throw feeds.error;
+  const stats = await supabase.from('channel_daily_stats').delete().eq('channel_id', id);
+  if (stats.error) throw stats.error;
+  live.clearChannel(id);
+  ws.broadcast(id, { type: 'cleared' });
+  res.json({ ok: true });
 }));
 
-router.get('/:id/feeds', guard(async (req, res) => {
-  const channel = await loadViewableChannel(req, res);
-  if (!channel) return;
-  const filters = parseFeedFilters(req.query);
-  if (filters.error) return res.status(400).json({ error: filters.error });
-  const limit = clampRows(req.query.limit, 100, 500);
+router.get('/:id/live', loadViewableChannel, (req, res) => {
+  res.json({ devices: live.get(req.channel.id) });
+});
+
+router.get('/:id/feeds', loadViewableChannel, asyncHandler(async (req, res) => {
+  const channel = req.channel;
+  const filters = parseFilters(req.query);
+  if (filters.error) throw new HttpError(400, filters.error);
+
+  if (req.query.per_device !== undefined) {
+    const { count, error: countError } = await supabase
+      .from('devices')
+      .select('id', { count: 'exact', head: true })
+      .eq('channel_id', channel.id);
+    if (countError) throw countError;
+    const requested = clampInt(req.query.per_device, 30, 1, 200);
+    const perDevice = Math.max(1, Math.min(requested, Math.floor(1000 / Math.max(1, count || 1))));
+    const { data, error } = await supabase.rpc('recent_feeds_per_device', {
+      p_channel: channel.id,
+      p_per: perDevice,
+    });
+    if (error) throw error;
+    data.sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : b.id - a.id));
+    return res.json(data);
+  }
+
+  const limit = clampInt(req.query.limit, 100, 1, 500);
   const { data, error } = await buildFeedQuery(channel.id, filters).limit(limit);
   if (error) throw error;
-  res.json(data);
+  return res.json(data);
 }));
 
-router.get('/:id/devices', guard(async (req, res) => {
-  const channel = await loadViewableChannel(req, res);
-  if (!channel) return;
+router.get('/:id/devices', loadViewableChannel, asyncHandler(async (req, res) => {
+  const channel = req.channel;
   const { data, error } = await supabase
     .from('devices')
     .select('*')
     .eq('channel_id', channel.id)
-    .order('last_seen_at', { ascending: false });
+    .order('last_seen_at', { ascending: false })
+    .limit(1000);
   if (error) throw error;
 
-  const staleAfterMs = Math.max(
-    DEFAULT_STALE_SECONDS,
-    (channel.min_interval_seconds || DEFAULT_MIN_INTERVAL) * DEVICE_STALE_MULTIPLIER
-  ) * 1000;
   const now = Date.now();
-  const shaped = data.map((d) => ({
-    ...d,
-    online: d.last_seen_at ? now - new Date(d.last_seen_at).getTime() < staleAfterMs : false,
+  res.json(data.map((device) => {
+    const seenDb = device.last_seen_at ? new Date(device.last_seen_at).getTime() : 0;
+    const seen = Math.max(seenDb, live.lastSeen(channel.id, device.device_id));
+    const expected = device.expected_interval_seconds || channel.min_interval_seconds || 1;
+    const staleMs = Math.max(DEFAULT_STALE_SECONDS, expected * STALE_MULTIPLIER) * 1000;
+    return {
+      ...device,
+      last_seen_at: seen ? new Date(seen).toISOString() : null,
+      online: seen > 0 && now - seen < staleMs,
+    };
   }));
-  res.json(shaped);
 }));
 
-router.post('/:id/clear', requireAdmin, guard(async (req, res) => {
-  const { error } = await supabase.from('feeds').delete().eq('channel_id', req.channel.id);
+router.patch('/:id/devices/:deviceRowId', ...owned, asyncHandler(async (req, res) => {
+  const rowId = parseId(req.params.deviceRowId, 'device id');
+  const body = bodyOf(req);
+  const updates = {};
+  if (body.name !== undefined) {
+    const name = String(body.name).trim().slice(0, MAX_NAME);
+    if (!name) throw new HttpError(400, 'name cannot be empty');
+    updates.name = name;
+  }
+  if (body.expected_interval_seconds !== undefined) {
+    if (body.expected_interval_seconds === null || body.expected_interval_seconds === '') {
+      updates.expected_interval_seconds = null;
+    } else {
+      const value = Number(body.expected_interval_seconds);
+      if (!Number.isInteger(value) || value < 1 || value > 86400) {
+        throw new HttpError(400, 'expected_interval_seconds must be an integer from 1 to 86400');
+      }
+      updates.expected_interval_seconds = value;
+    }
+  }
+  if (Object.keys(updates).length === 0) throw new HttpError(400, 'no valid fields to update');
+
+  const { data, error } = await supabase
+    .from('devices')
+    .update(updates)
+    .eq('id', rowId)
+    .eq('channel_id', req.channel.id)
+    .select('*')
+    .maybeSingle();
   if (error) throw error;
+  if (!data) throw new HttpError(404, 'device not found');
+  res.json(data);
+}));
+
+router.delete('/:id/devices/:deviceRowId', ...owned, asyncHandler(async (req, res) => {
+  const rowId = parseId(req.params.deviceRowId, 'device id');
+  const { data, error } = await supabase
+    .from('devices')
+    .delete()
+    .eq('id', rowId)
+    .eq('channel_id', req.channel.id)
+    .select('device_id')
+    .maybeSingle();
+  if (error) throw error;
+  if (!data) throw new HttpError(404, 'device not found');
+  devices.forget(req.channel.id, data.device_id);
+  live.clearDevice(req.channel.id, data.device_id);
   res.json({ ok: true });
 }));
 
-router.get('/:id/analytics', guard(async (req, res) => {
-  const channel = await loadViewableChannel(req, res);
-  if (!channel) return;
-  const id = channel.id;
-
-  const now = new Date();
+router.get('/:id/analytics', loadViewableChannel, asyncHandler(async (req, res) => {
+  const id = req.channel.id;
   const days = [];
-  for (let i = 6; i >= 0; i--) {
-    const start = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() - i));
-    const end = new Date(start.getTime() + 24 * 60 * 60 * 1000);
-    days.push({ date: start.toISOString().slice(0, 10), start: start.toISOString(), end: end.toISOString() });
+  for (let i = 6; i >= 0; i -= 1) {
+    const date = new Date();
+    date.setUTCDate(date.getUTCDate() - i);
+    days.push(date.toISOString().slice(0, 10));
   }
 
-  const countFeeds = () => supabase.from('feeds').select('id', { count: 'exact', head: true }).eq('channel_id', id);
-
-  const [total, devices, ...perDay] = await Promise.all([
-    countFeeds(),
-    supabase.from('devices').select('id', { count: 'exact', head: true }).eq('channel_id', id),
-    ...days.map((d) => countFeeds().gte('created_at', d.start).lt('created_at', d.end)),
+  const [statsResult, overviewResult] = await Promise.all([
+    supabase.from('channel_daily_stats').select('day,entries').eq('channel_id', id).gte('day', days[0]),
+    supabase.rpc('channel_overview', { p_ids: [id] }),
   ]);
+  if (statsResult.error) throw statsResult.error;
+  if (overviewResult.error) throw overviewResult.error;
 
-  const failed = [total, devices, ...perDay].find((r) => r.error);
-  if (failed) throw failed.error;
-
-  const daily = days.map((d, i) => ({ date: d.date, count: perDay[i].count || 0 }));
+  const byDay = new Map(statsResult.data.map((row) => [row.day, Number(row.entries) || 0]));
+  const daily = days.map((date) => ({ date, count: byDay.get(date) || 0 }));
+  const info = overviewResult.data[0] || {};
 
   res.json({
-    total_entries: total.count || 0,
-    device_count: devices.count || 0,
+    total_entries: Number(info.total_entries) || 0,
+    device_count: Number(info.device_count) || 0,
     entries_today: daily[daily.length - 1].count,
+    timezone: 'UTC',
     daily,
   });
 }));
 
-router.get('/:id/export.csv', exportLimiter, guard(async (req, res) => {
-  const channel = await loadViewableChannel(req, res);
-  if (!channel) return;
-  await handleCsvExport(req, res, channel);
+router.get('/:id/export.csv', limits.exportCsv, loadViewableChannel, asyncHandler(async (req, res) => {
+  const filters = parseFilters(req.query);
+  if (filters.error) throw new HttpError(400, filters.error);
+  const maxRows = clampInt(req.query.results, config.maxExportRows, 1, config.maxExportRows);
+  await streamCsv(res, req.channel, filters, maxRows);
 }));
 
-router.post('/:id/commands', requireAdmin, guard(async (req, res) => {
-  const body = req.body || {};
-  const command = String(body.command || '').trim().slice(0, MAX_COMMAND_LENGTH);
-  if (!command) return res.status(400).json({ error: 'command is required' });
-
-  const deviceId = String(body.device_id || 'all').trim().slice(0, 60) || 'all';
+router.post('/:id/commands', ...owned, asyncHandler(async (req, res) => {
+  const body = bodyOf(req);
+  const command = String(body.command || '').trim();
+  if (!COMMAND_NAME_RE.test(command)) {
+    throw new HttpError(400, 'command must be 1-60 characters: letters, digits, _ . : -');
+  }
 
   let payload = null;
   if (body.payload !== undefined && body.payload !== null) {
-    const serialized = JSON.stringify(body.payload);
-    if (serialized.length > MAX_PAYLOAD_JSON_LENGTH) {
-      return res.status(400).json({ error: 'payload too large' });
-    }
+    if (JSON.stringify(body.payload).length > MAX_PAYLOAD_JSON) throw new HttpError(400, 'payload too large');
     payload = body.payload;
   }
+  const ttl = clampInt(body.ttl_seconds, 3600, 10, 86400);
 
-  const { data, error } = await supabase
+  const { count, error: pendingError } = await supabase
     .from('commands')
-    .insert({ channel_id: req.channel.id, device_id: deviceId, command, payload })
-    .select()
-    .single();
+    .select('id', { count: 'exact', head: true })
+    .eq('channel_id', req.channel.id)
+    .in('status', ['pending', 'delivered']);
+  if (pendingError) throw pendingError;
+  if ((count || 0) >= MAX_PENDING_COMMANDS) throw new HttpError(429, 'too many pending commands');
+
+  let targets;
+  if (!body.device_id || body.device_id === 'all') {
+    const { data, error } = await supabase
+      .from('devices')
+      .select('device_id')
+      .eq('channel_id', req.channel.id)
+      .limit(1000);
+    if (error) throw error;
+    targets = data.map((row) => row.device_id);
+    if (targets.length === 0) throw new HttpError(400, 'no devices registered yet');
+  } else {
+    targets = [sanitizeDeviceId(body.device_id)];
+  }
+
+  const expiresAt = new Date(Date.now() + ttl * 1000).toISOString();
+  const rows = targets.map((deviceId) => ({
+    channel_id: req.channel.id,
+    device_id: deviceId,
+    command,
+    payload,
+    expires_at: expiresAt,
+  }));
+  const { data, error } = await supabase.from('commands').insert(rows).select('*');
   if (error) throw error;
-  res.status(201).json(data);
+  res.status(201).json({ commands: data });
 }));
 
-router.get('/:id/commands', requireAdmin, guard(async (req, res) => {
+router.get('/:id/commands', ...owned, asyncHandler(async (req, res) => {
   const { data, error } = await supabase
     .from('commands')
     .select('*')
     .eq('channel_id', req.channel.id)
     .order('created_at', { ascending: false })
-    .limit(MAX_COMMANDS_LIST);
+    .limit(50);
   if (error) throw error;
   res.json(data);
 }));
 
-router.delete('/:id/commands/:commandId', requireAdmin, guard(async (req, res) => {
-  const commandId = Number(req.params.commandId);
-  if (!Number.isInteger(commandId)) return res.status(400).json({ error: 'invalid command id' });
-
+router.delete('/:id/commands/:commandId', ...owned, asyncHandler(async (req, res) => {
+  const commandId = parseId(req.params.commandId, 'command id');
   const { error } = await supabase
     .from('commands')
     .delete()

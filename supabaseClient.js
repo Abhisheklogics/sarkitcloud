@@ -1,12 +1,6 @@
 const { createClient } = require('@supabase/supabase-js');
 const ws = require('ws');
-
-const url = process.env.SUPABASE_URL;
-const key = process.env.SUPABASE_KEY;
-
-if (!url || !key) {
-  throw new Error('SUPABASE_URL and SUPABASE_KEY must be set');
-}
+const config = require('./config');
 
 function keyRole(value) {
   if (value.startsWith('sb_secret_')) return 'service_role';
@@ -19,16 +13,13 @@ function keyRole(value) {
   }
 }
 
-if (keyRole(key) === 'anon') {
-  console.warn(
-    'SUPABASE_KEY is a public/anon key. Use the service_role (secret) key on the server, ' +
-    'then enable RLS with no public policies (see sql/schema.sql).'
-  );
+if (keyRole(config.supabaseServiceKey) === 'anon') {
+  throw new Error('SUPABASE_SERVICE_KEY must be the service_role / sb_secret key, not the anon or publishable key');
 }
 
-const supabase = createClient(url, key, {
-  auth: { persistSession: false, autoRefreshToken: false },
-  realtime: { transport: ws }
+const supabase = createClient(config.supabaseUrl, config.supabaseServiceKey, {
+  auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+  realtime: { transport: ws },
 });
 
 module.exports = supabase;

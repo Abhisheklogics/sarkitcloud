@@ -1,41 +1,45 @@
-const params = new URLSearchParams(window.location.search);
-const channelId = params.get('id');
-
+const channelId = (window.location.pathname.match(/^\/channel\/(\d+)\/?$/) || [])[1] || null;
 const MAX_CHART_POINTS = 60;
 const MAX_TABLE_ROWS = 50;
-const FEED_LOAD_LIMIT = 200;
-const SEEN_IDS_LIMIT = 1000;
-const FIELD_COUNT = 20;
-const DEVICE_COLOR_PALETTE = ['#0ea5a4', '#d97706', '#7c3aed', '#db2777', '#2563eb', '#65a30d', '#e11d48', '#0891b2'];
-const MONO_FONT = { family: 'IBM Plex Mono', size: 11 };
+const SEEN_LIMIT = 1000;
+const PALETTE = ['#0ea5a4', '#d97706', '#7c3aed', '#db2777', '#2563eb', '#65a30d', '#e11d48', '#0891b2'];
+const MONO = { family: 'IBM Plex Mono', size: 11 };
+const PUBLIC_SECTIONS = ['detailsCard', 'analyticsCard', 'liveCard', 'devicesCard', 'chartsCard', 'exportCard', 'feedsCard'];
+const OWNER_SECTIONS = ['apiCard', 'controlCard', 'settingsCard', 'dangerCard', 'keyRows'];
 
-let channelFields = [];
+const $ = (id) => document.getElementById(id);
+
+let channel = null;
+let owner = false;
+let fields = [];
 let charts = {};
-let chartLatest = {};
+let latestNodes = {};
 let analyticsChart = null;
 let socket = null;
+let retries = 0;
 let staleAfterMs = 60000;
 
-const deviceColorMap = new Map();
+const colorMap = new Map();
 const deviceNames = new Map();
 const liveCards = new Map();
-const seenFeedIds = new Set();
-
-function escapeHtml(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (ch) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;'
-  }[ch]));
-}
+const seenIds = new Set();
 
 function el(tag, className, text) {
   const node = document.createElement(tag);
   if (className) node.className = className;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+function show(ids, visible) {
+  ids.forEach((id) => {
+    $(id).hidden = !visible;
+  });
+}
+
+function setStatus(text) {
+  $('status').textContent = text || '';
+  $('status').hidden = !text;
 }
 
 function flash(node) {
@@ -45,10 +49,17 @@ function flash(node) {
   node.classList.add('flash');
 }
 
-async function getJson(url, options) {
-  const res = await fetch(url, options);
-  if (!res.ok) throw new Error(`${res.status} ${url}`);
-  return res.json();
+function fmtTime(ms) {
+  return new Date(ms).toLocaleTimeString();
+}
+
+function fmtAge(diffMs) {
+  const s = Math.max(0, Math.floor(diffMs / 1000));
+  if (s < 5) return 'just now';
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  return `${Math.floor(s / 86400)}d ago`;
 }
 
 function hexToRgba(hex, alpha) {
@@ -58,34 +69,20 @@ function hexToRgba(hex, alpha) {
   return `rgba(${r}, ${g}, ${b}, ${alpha})`;
 }
 
-function getDeviceColor(deviceId) {
-  if (!deviceColorMap.has(deviceId)) {
-    const hex = DEVICE_COLOR_PALETTE[deviceColorMap.size % DEVICE_COLOR_PALETTE.length];
-    deviceColorMap.set(deviceId, { line: hex, fill: hexToRgba(hex, 0.12) });
+function deviceColor(deviceId) {
+  if (!colorMap.has(deviceId)) {
+    const hex = PALETTE[colorMap.size % PALETTE.length];
+    colorMap.set(deviceId, { line: hex, fill: hexToRgba(hex, 0.12) });
   }
-  return deviceColorMap.get(deviceId);
+  return colorMap.get(deviceId);
 }
 
 function displayName(deviceId) {
   return deviceNames.get(deviceId) || deviceId;
 }
 
-function formatTime(ms) {
-  return new Date(ms).toLocaleTimeString();
-}
-
-function formatAge(diffMs) {
-  const s = Math.max(0, Math.floor(diffMs / 1000));
-  if (s < 5) return 'just now';
-  if (s < 60) return `${s}s ago`;
-  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
-  return `${Math.floor(s / 86400)}d ago`;
-}
-
 function themeColors() {
-  const dark = document.documentElement.getAttribute('data-theme') === 'dark';
-  return dark
+  return document.documentElement.getAttribute('data-theme') === 'dark'
     ? { tick: '#9fb8ab', grid: '#23362d' }
     : { tick: '#55645c', grid: '#dde4e0' };
 }
@@ -111,44 +108,28 @@ function createLineChart(canvas) {
       animation: { duration: 200 },
       interaction: { mode: 'nearest', axis: 'x', intersect: false },
       plugins: {
-        legend: {
-          display: false,
-          position: 'bottom',
-          labels: { color: colors.tick, font: MONO_FONT, usePointStyle: true, boxWidth: 8 }
-        },
-        tooltip: {
-          callbacks: {
-            title: (items) => (items.length ? new Date(items[0].parsed.x).toLocaleString() : '')
-          }
-        }
+        legend: { display: false, position: 'bottom', labels: { color: colors.tick, font: MONO, usePointStyle: true, boxWidth: 8 } },
+        tooltip: { callbacks: { title: (items) => (items.length ? new Date(items[0].parsed.x).toLocaleString() : '') } },
       },
       scales: {
-        x: {
-          type: 'linear',
-          bounds: 'data',
-          ticks: { maxTicksLimit: 6, color: colors.tick, font: MONO_FONT, callback: (value) => formatTime(value) },
-          grid: { color: colors.grid }
-        },
-        y: {
-          ticks: { color: colors.tick, font: MONO_FONT },
-          grid: { color: colors.grid }
-        }
-      }
-    }
+        x: { type: 'linear', bounds: 'data', ticks: { maxTicksLimit: 6, color: colors.tick, font: MONO, callback: (v) => fmtTime(v) }, grid: { color: colors.grid } },
+        y: { ticks: { color: colors.tick, font: MONO }, grid: { color: colors.grid } },
+      },
+    },
   });
 }
 
 function pointRadius(context) {
   const data = context.dataset.data;
   let last = data.length - 1;
-  while (last >= 0 && data[last] === null) last--;
+  while (last >= 0 && data[last] === null) last -= 1;
   return context.dataIndex === last ? 5 : 2;
 }
 
 function ensureDataset(chart, deviceId) {
   let dataset = chart.data.datasets.find((d) => d.deviceId === deviceId);
   if (!dataset) {
-    const color = getDeviceColor(deviceId);
+    const color = deviceColor(deviceId);
     dataset = {
       deviceId,
       label: displayName(deviceId),
@@ -160,7 +141,7 @@ function ensureDataset(chart, deviceId) {
       pointRadius,
       pointHoverRadius: 5,
       spanGaps: true,
-      fill: false
+      fill: false,
     };
     chart.data.datasets.push(dataset);
   }
@@ -172,13 +153,12 @@ function pointFromFeed(feed, key) {
   if (raw === null || raw === undefined || raw === '') return null;
   const y = Number(raw);
   const x = new Date(feed.created_at).getTime();
-  if (!Number.isFinite(y) || !Number.isFinite(x)) return null;
-  return { x, y };
+  return Number.isFinite(y) && Number.isFinite(x) ? { x, y } : null;
 }
 
 function refreshLatest(key) {
   const chart = charts[key];
-  const node = chartLatest[key];
+  const node = latestNodes[key];
   if (!chart || !node) return;
   let best = null;
   let bestDevice = null;
@@ -189,69 +169,53 @@ function refreshLatest(key) {
       bestDevice = dataset.deviceId;
     }
   });
-  if (!best) {
-    node.textContent = 'waiting for data';
-    return;
-  }
-  node.textContent = `${best.y} \u00b7 ${formatTime(best.x)} \u00b7 ${displayName(bestDevice)}`;
+  node.textContent = best ? `${best.y} \u00b7 ${fmtTime(best.x)} \u00b7 ${displayName(bestDevice)}` : 'waiting for data';
 }
 
-function fillApiUsage(ch) {
+function fillKeys() {
   const origin = window.location.origin;
-  const sample = channelFields.map((f) => `${f.key}=0`).join('&');
-  const writeKey = ch.write_api_key;
-  const readKey = ch.read_api_key;
-  const set = (id, text) => { document.getElementById(id).textContent = text; };
+  const w = channel.write_api_key;
+  const r = channel.read_api_key;
+  const sample = fields.map((f) => `${f.key}=0`).join('&');
+  const set = (id, text) => {
+    $(id).textContent = text;
+  };
+  set('writeKey', w);
+  set('readKey', r);
   set('apiWriteUrl', `${origin}/update`);
-  set('apiWriteBody', `api_key=${writeKey}&device_id=device-1&${sample}`);
-  set('apiWriteGet', `${origin}/update?api_key=${writeKey}&device_id=device-1&${sample}`);
-  set('apiReadLast', `${origin}/channels/${ch.id}/fields/1/last.txt?api_key=${readKey}`);
-  set('apiRead', `${origin}/read?api_key=${readKey}&field=1`);
-  set('apiCsv', `${origin}/channels/${ch.id}/feeds.csv?api_key=${readKey}`);
-  set('apiCommandJson', `${origin}/command?api_key=${writeKey}&device_id=device-1`);
-  set('apiCommandText', `${origin}/command?api_key=${writeKey}&device_id=device-1&format=text`);
+  set('apiWriteBody', `api_key=${w}&device_id=device-1&${sample}`);
+  set('apiWriteGet', `${origin}/update?api_key=${w}&device_id=device-1&${sample}`);
+  set('apiBulk', `${origin}/update/bulk`);
+  set('apiReadLast', `${origin}/channels/${channel.id}/fields/1/last.txt?api_key=${r}`);
+  set('apiRead', `${origin}/read?api_key=${r}&field=1`);
+  set('apiCsv', `${origin}/channels/${channel.id}/feeds.csv?api_key=${r}`);
+  set('apiCommandText', `${origin}/command?api_key=${w}&device_id=device-1&format=text`);
+  set('apiAck', `${origin}/command/ack?api_key=${w}&command_id=ID`);
 }
 
-async function loadChannel() {
-  if (!channelId) {
-    alert('No channel selected');
-    window.location.href = 'index.html';
-    throw new Error('missing channel id');
+function applyChannel() {
+  owner = Boolean(channel.is_owner);
+  $('channelName').textContent = channel.name;
+  $('channelId').textContent = channel.id;
+  document.title = `${channel.name} \u2014 SarkitCloud`;
+  fields = [];
+  for (let i = 1; i <= 20; i += 1) {
+    if (channel[`field${i}`]) fields.push({ key: `field${i}`, label: channel[`field${i}`] });
   }
+  staleAfterMs = Math.max(60, Number(channel.min_interval_seconds) * 3) * 1000;
+  $('minInterval').value = channel.min_interval_seconds;
+  $('retentionDays').value = channel.retention_days;
+  if (publicConfig && publicConfig.limits) $('retentionDays').max = publicConfig.limits.maxRetentionDays;
+  $('isPublic').checked = Boolean(channel.is_public);
+  if (owner) fillKeys();
+}
 
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}`, { headers: adminHeaders(channelId) });
-  if (!res.ok) {
-    alert('Channel not found');
-    window.location.href = 'index.html';
-    throw new Error('channel not found');
-  }
-  const ch = await res.json();
-  const isAdminView = Boolean(ch.write_api_key);
-  document.getElementById('unlockCard').hidden = isAdminView;
-  ['controlSection', 'settingsSection', 'dangerSection'].forEach((id) => {
-    const section = document.getElementById(id);
-    if (section) section.hidden = !isAdminView;
-  });
-  document.getElementById('channelName').textContent = ch.name;
-  document.getElementById('channelId').textContent = ch.id;
-  document.getElementById('writeKey').textContent = ch.write_api_key || 'Hidden \u2014 open from the browser you created this channel in';
-  document.getElementById('readKey').textContent = ch.read_api_key || 'Hidden \u2014 open from the browser you created this channel in';
-  document.getElementById('minInterval').value = ch.min_interval_seconds;
-  document.getElementById('isPublic').checked = ch.is_public !== false;
-  staleAfterMs = Math.max(60, Number(ch.min_interval_seconds) * 3) * 1000;
-
-  channelFields = [];
-  for (let i = 1; i <= FIELD_COUNT; i++) {
-    if (ch[`field${i}`]) channelFields.push({ key: `field${i}`, label: ch[`field${i}`] });
-  }
-
-  if (ch.write_api_key && ch.read_api_key) fillApiUsage(ch);
-
-  const chartsWrap = document.getElementById('chartsWrap');
-  chartsWrap.innerHTML = '';
+function buildCharts() {
+  const wrap = $('chartsWrap');
+  wrap.innerHTML = '';
   charts = {};
-  chartLatest = {};
-  channelFields.forEach((f) => {
+  latestNodes = {};
+  fields.forEach((f) => {
     const box = el('div', 'chart-box');
     const head = el('div', 'chart-head');
     head.appendChild(el('h3', null, f.label));
@@ -259,19 +223,17 @@ async function loadChannel() {
     head.appendChild(latest);
     const canvas = document.createElement('canvas');
     box.append(head, canvas);
-    chartsWrap.appendChild(box);
-    chartLatest[f.key] = latest;
+    wrap.appendChild(box);
+    latestNodes[f.key] = latest;
     charts[f.key] = createLineChart(canvas);
   });
-
-  const header = document.getElementById('feedsHeader');
-  header.innerHTML = '<th>Time</th><th>Device</th>' + channelFields.map((f) => `<th>${escapeHtml(f.label)}</th>`).join('');
+  const header = $('feedsHeader');
+  header.replaceChildren(el('th', null, 'Time'), el('th', null, 'Device'), ...fields.map((f) => el('th', null, f.label)));
 }
 
 function ensureLiveCard(deviceId) {
   let card = liveCards.get(deviceId);
   if (card) return card;
-
   const root = el('div', 'device-live-card');
   const header = el('div', 'device-live-header');
   const title = el('strong');
@@ -280,10 +242,9 @@ function ensureLiveCard(deviceId) {
   title.append(dot, name);
   const age = el('span', 'live-age', '');
   header.append(title, age);
-
   const grid = el('div', 'fields-grid');
   const values = {};
-  channelFields.forEach((f) => {
+  fields.forEach((f) => {
     const box = el('div', 'field-box');
     box.appendChild(el('span', 'field-label', f.label));
     const value = el('span', 'field-value', '--');
@@ -291,30 +252,27 @@ function ensureLiveCard(deviceId) {
     grid.appendChild(box);
     values[f.key] = { box, value };
   });
-
   root.append(header, grid);
   card = { root, dot, name, age, values, updatedAt: Date.now() };
   liveCards.set(deviceId, card);
-  document.getElementById('liveValues').appendChild(root);
+  $('liveValues').appendChild(root);
   return card;
 }
 
 function refreshAge(card) {
   const diff = Date.now() - card.updatedAt;
-  card.age.textContent = formatAge(diff);
+  card.age.textContent = fmtAge(diff);
   card.root.classList.toggle('is-stale', diff > staleAfterMs);
 }
 
-function renderDeviceLive(deviceId, fields, updatedAt) {
-  const liveDiv = document.getElementById('liveValues');
-  const placeholder = liveDiv.querySelector('.empty-state');
+function renderLive(deviceId, values, updatedAt) {
+  const placeholder = $('liveValues').querySelector('.empty-state');
   if (placeholder) placeholder.remove();
-
   const card = ensureLiveCard(deviceId);
-  channelFields.forEach((f) => {
-    const entry = card.values[f.key];
-    const raw = fields ? fields[f.key] : undefined;
+  fields.forEach((f) => {
+    const raw = values ? values[f.key] : undefined;
     const text = raw === undefined || raw === null ? '--' : String(raw);
+    const entry = card.values[f.key];
     if (entry.value.textContent !== text) {
       entry.value.textContent = text;
       flash(entry.box);
@@ -326,20 +284,16 @@ function renderDeviceLive(deviceId, fields, updatedAt) {
 }
 
 async function loadLive() {
-  const liveDiv = document.getElementById('liveValues');
   try {
-    const live = await getJson(`${API_BASE}/api/channels/${channelId}/live`);
-    liveDiv.innerHTML = '';
+    const live = await api(`/api/channels/${channelId}/live`);
+    $('liveValues').innerHTML = '';
     liveCards.clear();
-    const devices = live.devices || {};
-    const deviceIds = Object.keys(devices);
-    if (deviceIds.length === 0) {
-      liveDiv.appendChild(el('p', 'empty-state', 'No live data yet'));
+    const ids = Object.keys(live.devices || {});
+    if (ids.length === 0) {
+      $('liveValues').appendChild(el('p', 'empty-state', 'No live data yet'));
       return;
     }
-    deviceIds.forEach((deviceId) => {
-      renderDeviceLive(deviceId, devices[deviceId].fields, devices[deviceId].updatedAt);
-    });
+    ids.forEach((id) => renderLive(id, live.devices[id].fields, live.devices[id].updatedAt));
   } catch (err) {
     console.error('loadLive failed:', err);
   }
@@ -348,112 +302,242 @@ async function loadLive() {
 function buildFeedRow(feed) {
   const row = document.createElement('tr');
   row.appendChild(el('td', null, new Date(feed.created_at).toLocaleString()));
-  const deviceKey = feed.device_id || 'default';
-  const deviceCell = el('td', null, displayName(deviceKey));
-  deviceCell.dataset.device = deviceKey;
-  row.appendChild(deviceCell);
-  channelFields.forEach((cf) => {
-    const value = feed[cf.key];
+  const key = feed.device_id || 'default';
+  const cell = el('td', null, displayName(key));
+  cell.dataset.device = key;
+  row.appendChild(cell);
+  fields.forEach((f) => {
+    const value = feed[f.key];
     row.appendChild(el('td', null, value === null || value === undefined ? '' : String(value)));
   });
   return row;
 }
 
-function rememberFeedId(id) {
+function rememberId(id) {
   if (id === undefined || id === null) return true;
-  if (seenFeedIds.has(id)) return false;
-  seenFeedIds.add(id);
-  if (seenFeedIds.size > SEEN_IDS_LIMIT) seenFeedIds.delete(seenFeedIds.values().next().value);
+  if (seenIds.has(id)) return false;
+  seenIds.add(id);
+  if (seenIds.size > SEEN_LIMIT) seenIds.delete(seenIds.values().next().value);
   return true;
 }
 
-function appendChartPoints(feed) {
-  const deviceId = feed.device_id || 'default';
-  channelFields.forEach((cf) => {
-    const chart = charts[cf.key];
-    const point = pointFromFeed(feed, cf.key);
-    if (!chart || !point) return;
-    const dataset = ensureDataset(chart, deviceId);
-    dataset.data.push(point);
-    if (dataset.data.length > MAX_CHART_POINTS) dataset.data.shift();
-    chart.options.plugins.legend.display = chart.data.datasets.length > 0;
-    chart.update();
-    refreshLatest(cf.key);
-    flash(chartLatest[cf.key]);
-  });
-}
-
 function handleFeed(feed) {
-  if (!rememberFeedId(feed.id)) return;
-  const body = document.getElementById('feedsBody');
+  if (!rememberId(feed.id)) return;
+  const body = $('feedsBody');
   const row = buildFeedRow(feed);
   row.classList.add('flash-row');
   body.insertBefore(row, body.firstChild);
   while (body.children.length > MAX_TABLE_ROWS) body.removeChild(body.lastChild);
-  appendChartPoints(feed);
+  const deviceId = feed.device_id || 'default';
+  fields.forEach((f) => {
+    const chart = charts[f.key];
+    const point = pointFromFeed(feed, f.key);
+    if (!chart || !point) return;
+    const dataset = ensureDataset(chart, deviceId);
+    dataset.data.push(point);
+    if (dataset.data.length > MAX_CHART_POINTS) dataset.data.shift();
+    chart.options.plugins.legend.display = chart.data.datasets.length > 1;
+    chart.update();
+    refreshLatest(f.key);
+    flash(latestNodes[f.key]);
+  });
 }
 
 async function loadFeeds() {
   try {
-    const feeds = await getJson(`${API_BASE}/api/channels/${channelId}/feeds?limit=${FEED_LOAD_LIMIT}`);
-    const body = document.getElementById('feedsBody');
+    const feeds = await api(`/api/channels/${channelId}/feeds?per_device=${MAX_CHART_POINTS}`);
+    const body = $('feedsBody');
     body.innerHTML = '';
-    seenFeedIds.clear();
+    seenIds.clear();
     feeds.slice(0, MAX_TABLE_ROWS).forEach((f) => body.appendChild(buildFeedRow(f)));
-    feeds.forEach((f) => rememberFeedId(f.id));
-
+    feeds.forEach((f) => rememberId(f.id));
     const chronological = [...feeds].reverse();
-    channelFields.forEach((cf) => {
-      const chart = charts[cf.key];
-      if (!chart) return;
+    fields.forEach((f) => {
+      const chart = charts[f.key];
       chart.data.datasets = [];
-      chronological.forEach((f) => {
-        const point = pointFromFeed(f, cf.key);
-        if (point) ensureDataset(chart, f.device_id || 'default').data.push(point);
+      chronological.forEach((feed) => {
+        const point = pointFromFeed(feed, f.key);
+        if (point) ensureDataset(chart, feed.device_id || 'default').data.push(point);
       });
       chart.data.datasets.forEach((dataset) => {
         if (dataset.data.length > MAX_CHART_POINTS) dataset.data.splice(0, dataset.data.length - MAX_CHART_POINTS);
       });
-      chart.options.plugins.legend.display = chart.data.datasets.length > 0;
+      chart.options.plugins.legend.display = chart.data.datasets.length > 1;
       chart.update();
-      refreshLatest(cf.key);
+      refreshLatest(f.key);
     });
   } catch (err) {
     console.error('loadFeeds failed:', err);
   }
 }
 
+function fillSelect(id, firstValue, firstLabel, devices) {
+  const select = $(id);
+  const current = select.value;
+  select.replaceChildren(new Option(firstLabel, firstValue));
+  devices.forEach((d) => select.appendChild(new Option(d.name || d.device_id, d.device_id)));
+  select.value = current;
+}
+
+function actionButton(label, className, handler) {
+  const button = el('button', className, label);
+  button.type = 'button';
+  button.addEventListener('click', handler);
+  return button;
+}
+
+async function patchDevice(device, body) {
+  try {
+    await api(`/api/channels/${channelId}/devices/${device.id}`, { method: 'PATCH', body });
+  } catch (err) {
+    alert(err.message);
+  }
+  loadDevices();
+}
+
+function deviceItem(d) {
+  const row = el('div', 'device-item');
+  row.appendChild(el('span', `status-dot ${d.online ? 'online' : 'offline'}`));
+  row.appendChild(el('span', 'device-name', d.name || d.device_id));
+  row.appendChild(el('span', 'device-id-label', d.device_id));
+  row.appendChild(el('span', 'device-last-seen', d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : 'never'));
+  if (owner) {
+    row.appendChild(actionButton('Rename', 'rename-device-btn', () => {
+      const name = prompt('Device name', d.name || d.device_id);
+      if (name && name.trim()) patchDevice(d, { name: name.trim() });
+    }));
+    row.appendChild(actionButton('Interval', 'rename-device-btn', () => {
+      const value = prompt('Expected seconds between posts (empty = default)', d.expected_interval_seconds || '');
+      if (value === null) return;
+      patchDevice(d, { expected_interval_seconds: value.trim() === '' ? null : Number(value) });
+    }));
+    row.appendChild(actionButton('Remove', 'delete-device-btn', async () => {
+      if (!confirm('Remove this device record? It reappears if it posts again.')) return;
+      try {
+        await api(`/api/channels/${channelId}/devices/${d.id}`, { method: 'DELETE' });
+      } catch (err) {
+        alert(err.message);
+      }
+      loadDevices();
+    }));
+  }
+  return row;
+}
+
 function refreshDeviceLabels() {
   Object.keys(charts).forEach((key) => {
-    const chart = charts[key];
-    chart.data.datasets.forEach((dataset) => { dataset.label = displayName(dataset.deviceId); });
-    chart.update('none');
+    charts[key].data.datasets.forEach((dataset) => {
+      dataset.label = displayName(dataset.deviceId);
+    });
+    charts[key].update('none');
     refreshLatest(key);
   });
-  liveCards.forEach((card, deviceId) => { card.name.textContent = displayName(deviceId); });
+  liveCards.forEach((card, id) => {
+    card.name.textContent = displayName(id);
+  });
   document.querySelectorAll('#feedsBody [data-device]').forEach((cell) => {
     cell.textContent = displayName(cell.dataset.device);
   });
 }
 
-function setConnection(online) {
-  const indicator = document.querySelector('.live-indicator');
-  if (!indicator) return;
-  indicator.textContent = online ? 'real-time' : 'reconnecting\u2026';
-  indicator.classList.toggle('is-offline', !online);
+async function loadDevices() {
+  let devices;
+  try {
+    devices = await api(`/api/channels/${channelId}/devices`);
+  } catch (err) {
+    console.error('loadDevices failed:', err);
+    return;
+  }
+  deviceNames.clear();
+  devices.forEach((d) => deviceNames.set(d.device_id, d.name || d.device_id));
+  refreshDeviceLabels();
+  fillSelect('exportDevice', '', 'All devices', devices);
+  fillSelect('commandDevice', 'all', 'All devices', devices);
+  if (devices.length === 0) {
+    $('devicesList').replaceChildren(el('p', 'empty-state', 'No devices detected yet'));
+    return;
+  }
+  $('devicesList').replaceChildren(...devices.map(deviceItem));
 }
 
-function connectWebSocket() {
-  const adminKey = getAdminKey(channelId);
-  const wsUrl = `${WS_BASE}/ws?channel=${channelId}${adminKey ? `&admin_key=${encodeURIComponent(adminKey)}` : ''}`;
-  socket = new WebSocket(wsUrl);
+async function loadAnalytics() {
+  let analytics;
+  try {
+    analytics = await api(`/api/channels/${channelId}/analytics`);
+  } catch (err) {
+    console.error('loadAnalytics failed:', err);
+    return;
+  }
+  $('statTotalEntries').textContent = analytics.total_entries;
+  $('statDeviceCount').textContent = analytics.device_count;
+  $('statEntriesToday').textContent = analytics.entries_today;
+  const labels = analytics.daily.map((d) => d.date.slice(5));
+  const values = analytics.daily.map((d) => d.count);
+  if (analyticsChart) {
+    analyticsChart.data.labels = labels;
+    analyticsChart.data.datasets[0].data = values;
+    analyticsChart.update('none');
+    return;
+  }
+  const colors = themeColors();
+  analyticsChart = new Chart($('analyticsChart').getContext('2d'), {
+    type: 'bar',
+    data: { labels, datasets: [{ label: 'Entries per day', data: values, backgroundColor: '#cb8a46', borderRadius: 3 }] },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: colors.tick, font: MONO }, grid: { display: false } },
+        y: { ticks: { color: colors.tick, font: MONO }, grid: { color: colors.grid } },
+      },
+    },
+  });
+}
 
+async function loadCommands() {
+  if (!owner) return;
+  const body = $('commandsBody');
+  try {
+    const commands = await api(`/api/channels/${channelId}/commands`);
+    if (commands.length === 0) {
+      const row = document.createElement('tr');
+      const cell = el('td', 'empty-state', 'No commands sent yet');
+      cell.colSpan = 4;
+      row.appendChild(cell);
+      body.replaceChildren(row);
+      return;
+    }
+    body.replaceChildren(...commands.map((c) => {
+      const row = document.createElement('tr');
+      row.appendChild(el('td', null, new Date(c.created_at).toLocaleString()));
+      row.appendChild(el('td', null, c.device_id));
+      row.appendChild(el('td', null, c.command));
+      const cell = document.createElement('td');
+      cell.appendChild(el('span', `cmd-status cmd-${c.status}`, c.status));
+      row.appendChild(cell);
+      return row;
+    }));
+  } catch (err) {
+    console.error('loadCommands failed:', err);
+  }
+}
+
+function setConnection(online) {
+  const node = $('liveIndicator');
+  node.textContent = online ? 'real-time' : 'reconnecting...';
+  node.classList.toggle('is-offline', !online);
+}
+
+async function connectSocket() {
+  const token = await getToken();
+  socket = new WebSocket(`${WS_BASE}/ws?channel=${encodeURIComponent(channelId)}`);
   socket.onopen = () => {
+    retries = 0;
     setConnection(true);
+    if (token) socket.send(JSON.stringify({ type: 'auth', token }));
     loadLive();
     loadFeeds();
   };
-
   socket.onmessage = (event) => {
     let msg;
     try {
@@ -461,180 +545,27 @@ function connectWebSocket() {
     } catch {
       return;
     }
-    if (msg.type === 'live') renderDeviceLive(msg.deviceId, msg.fields, msg.updatedAt);
+    if (msg.type === 'live') renderLive(msg.deviceId, msg.fields, msg.updatedAt);
     if (msg.type === 'feed') handleFeed(msg.feed);
-    if (msg.type === 'bulk') {
+    if (msg.type === 'bulk' || msg.type === 'cleared') {
       loadFeeds();
       loadAnalytics();
+      if (msg.type === 'cleared') loadLive();
     }
+    if (msg.type === 'commands') loadCommands();
   };
-
-  socket.onclose = () => {
+  socket.onclose = (event) => {
     setConnection(false);
-    setTimeout(connectWebSocket, 3000);
+    if (event.code === 1008 || event.code === 1000) return;
+    retries += 1;
+    setTimeout(connectSocket, Math.min(30000, 3000 * 2 ** Math.min(retries, 4)));
   };
-
-  socket.onerror = () => {
-    socket.close();
-  };
-}
-
-function populateExportDevices(devices) {
-  const select = document.getElementById('exportDevice');
-  const current = select.value;
-  select.innerHTML = '<option value="">All devices</option>';
-  devices.forEach((d) => {
-    const option = document.createElement('option');
-    option.value = d.device_id;
-    option.textContent = d.name || d.device_id;
-    select.appendChild(option);
-  });
-  select.value = current;
-}
-
-function populateCommandDevices(devices) {
-  const select = document.getElementById('commandDevice');
-  const current = select.value;
-  select.innerHTML = '<option value="all">All devices</option>';
-  devices.forEach((d) => {
-    const option = document.createElement('option');
-    option.value = d.device_id;
-    option.textContent = d.name || d.device_id;
-    select.appendChild(option);
-  });
-  select.value = current;
-}
-
-async function loadDevices() {
-  const list = document.getElementById('devicesList');
-  let devices;
-  try {
-    devices = await getJson(`${API_BASE}/api/channels/${channelId}/devices`);
-  } catch (err) {
-    console.error('loadDevices failed:', err);
-    return;
-  }
-
-  if (!Array.isArray(devices) || devices.length === 0) {
-    list.innerHTML = '<p class="empty-state">No devices detected yet</p>';
-    return;
-  }
-
-  deviceNames.clear();
-  devices.forEach((d) => deviceNames.set(d.device_id, d.name || d.device_id));
-  refreshDeviceLabels();
-  populateExportDevices(devices);
-  populateCommandDevices(devices);
-
-  list.innerHTML = devices.map((d) => `
-    <div class="device-item">
-      <span class="status-dot ${d.online ? 'online' : 'offline'}"></span>
-      <span class="device-name">${escapeHtml(d.name || d.device_id)}</span>
-      <span class="device-id-label">${escapeHtml(d.device_id)}</span>
-      <span class="device-last-seen">${escapeHtml(d.last_seen_at ? new Date(d.last_seen_at).toLocaleString() : 'never')}</span>
-      <button class="rename-device-btn" data-id="${escapeHtml(d.id)}" data-current="${escapeHtml(d.name || d.device_id)}">Rename</button>
-      <button class="delete-device-btn" data-id="${escapeHtml(d.id)}">Remove</button>
-    </div>
-  `).join('');
-
-  list.querySelectorAll('.rename-device-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const newName = prompt('Device name', btn.dataset.current);
-      if (!newName || !newName.trim()) return;
-      const res = await fetch(`${API_BASE}/api/devices/${btn.dataset.id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json', ...adminHeaders(channelId) },
-        body: JSON.stringify({ name: newName.trim() })
-      });
-      if (!res.ok) alert('Rename failed');
-      loadDevices();
-    });
-  });
-
-  list.querySelectorAll('.delete-device-btn').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      if (!confirm('Remove this device record?')) return;
-      const res = await fetch(`${API_BASE}/api/devices/${btn.dataset.id}`, {
-        method: 'DELETE',
-        headers: adminHeaders(channelId)
-      });
-      if (!res.ok) alert('Remove failed');
-      loadDevices();
-    });
-  });
-}
-
-async function loadAnalytics() {
-  let analytics;
-  try {
-    analytics = await getJson(`${API_BASE}/api/channels/${channelId}/analytics`);
-  } catch (err) {
-    console.error('loadAnalytics failed:', err);
-    return;
-  }
-
-  document.getElementById('statTotalEntries').textContent = analytics.total_entries;
-  document.getElementById('statDeviceCount').textContent = analytics.device_count;
-  document.getElementById('statEntriesToday').textContent = analytics.entries_today;
-
-  const labels = analytics.daily.map((d) => d.date.slice(5));
-  const values = analytics.daily.map((d) => d.count);
-
-  if (analyticsChart) {
-    analyticsChart.data.labels = labels;
-    analyticsChart.data.datasets[0].data = values;
-    analyticsChart.update('none');
-    return;
-  }
-
-  const colors = themeColors();
-  analyticsChart = new Chart(document.getElementById('analyticsChart').getContext('2d'), {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ label: 'Entries per day', data: values, backgroundColor: '#cb8a46', borderRadius: 3 }]
-    },
-    options: {
-      responsive: true,
-      plugins: { legend: { display: false } },
-      scales: {
-        x: { ticks: { color: colors.tick, font: MONO_FONT }, grid: { display: false } },
-        y: { ticks: { color: colors.tick, font: MONO_FONT }, grid: { color: colors.grid } }
-      }
-    }
-  });
-}
-
-function statusBadge(status) {
-  return `<span class="cmd-status cmd-${status}">${status}</span>`;
-}
-
-async function loadCommands() {
-  if (!getAdminKey(channelId)) return;
-  const body = document.getElementById('commandsBody');
-  try {
-    const commands = await getJson(`${API_BASE}/api/channels/${channelId}/commands`, { headers: adminHeaders(channelId) });
-    if (!Array.isArray(commands) || commands.length === 0) {
-      body.innerHTML = '<tr><td colspan="4" class="empty-state">No commands sent yet</td></tr>';
-      return;
-    }
-    body.innerHTML = commands.map((c) => `
-      <tr>
-        <td>${new Date(c.created_at).toLocaleString()}</td>
-        <td>${escapeHtml(c.device_id)}</td>
-        <td>${escapeHtml(c.command)}</td>
-        <td>${statusBadge(c.status)}</td>
-      </tr>
-    `).join('');
-  } catch (err) {
-    console.error('loadCommands failed:', err);
-  }
+  socket.onerror = () => socket.close();
 }
 
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
-    return;
   } catch {
     const area = document.createElement('textarea');
     area.value = text;
@@ -649,114 +580,87 @@ async function copyText(text) {
 
 document.querySelectorAll('.copy-btn').forEach((btn) => {
   btn.addEventListener('click', async () => {
-    const target = document.getElementById(btn.dataset.copyTarget);
-    await copyText(target.textContent);
+    await copyText($(btn.dataset.copyTarget).textContent);
     btn.textContent = 'Copied';
-    setTimeout(() => { btn.textContent = 'Copy'; }, 1200);
+    setTimeout(() => {
+      btn.textContent = 'Copy';
+    }, 1200);
   });
 });
 
-document.getElementById('settingsForm').addEventListener('submit', async (e) => {
-  e.preventDefault();
-  const min_interval_seconds = document.getElementById('minInterval').value;
-  const is_public = document.getElementById('isPublic').checked;
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...adminHeaders(channelId) },
-    body: JSON.stringify({ min_interval_seconds, is_public })
-  });
-  if (!res.ok) {
-    let message = 'Could not save settings';
-    try {
-      const body = await res.json();
-      if (body.error) message = body.error;
-    } catch {}
-    alert(message);
-    return;
-  }
-  staleAfterMs = Math.max(60, Number(min_interval_seconds) * 3) * 1000;
-  alert('Settings saved');
-});
+$('logoutBtn').addEventListener('click', logout);
 
-document.getElementById('unlockForm').addEventListener('submit', async (e) => {
+$('settingsForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const key = document.getElementById('unlockKey').value.trim();
-  if (!key) return;
   try {
-    const res = await fetch(`${API_BASE}/api/channels/${channelId}`, { headers: { 'x-admin-key': key } });
-    const body = res.ok ? await res.json() : null;
-    if (!body || !body.write_api_key) {
-      alert('Invalid admin key');
-      return;
-    }
-    setAdminKey(channelId, key);
-    window.location.reload();
-  } catch {
-    alert('Could not verify the key. Try again.');
+    channel = await api(`/api/channels/${channelId}`, {
+      method: 'PATCH',
+      body: {
+        min_interval_seconds: Number($('minInterval').value),
+        retention_days: Number($('retentionDays').value),
+        is_public: $('isPublic').checked,
+      },
+    });
+    staleAfterMs = Math.max(60, Number(channel.min_interval_seconds) * 3) * 1000;
+    alert('Settings saved');
+  } catch (err) {
+    alert(err.message);
   }
 });
 
-document.getElementById('commandForm').addEventListener('submit', async (e) => {
+$('commandForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const device_id = document.getElementById('commandDevice').value;
-  const command = document.getElementById('commandName').value.trim();
-  const payloadText = document.getElementById('commandPayload').value.trim();
-
+  const text = $('commandPayload').value.trim();
   let payload;
-  if (payloadText) {
+  if (text) {
     try {
-      payload = JSON.parse(payloadText);
+      payload = JSON.parse(text);
     } catch {
       alert('Payload must be valid JSON');
       return;
     }
   }
-
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}/commands`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...adminHeaders(channelId) },
-    body: JSON.stringify({ device_id, command, payload })
-  });
-
-  if (!res.ok) {
-    alert('Failed to send command');
-    return;
+  try {
+    await api(`/api/channels/${channelId}/commands`, {
+      method: 'POST',
+      body: { device_id: $('commandDevice').value, command: $('commandName').value.trim(), payload },
+    });
+    $('commandName').value = '';
+    $('commandPayload').value = '';
+    loadCommands();
+  } catch (err) {
+    alert(err.message);
   }
-  document.getElementById('commandName').value = '';
-  document.getElementById('commandPayload').value = '';
-  loadCommands();
 });
 
-document.getElementById('exportForm').addEventListener('submit', async (e) => {
+$('exportForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const startValue = document.getElementById('exportStart').value;
-  const endValue = document.getElementById('exportEnd').value;
-  const device = document.getElementById('exportDevice').value;
-  if (startValue && endValue && startValue > endValue) {
+  const start = $('exportStart').value;
+  const end = $('exportEnd').value;
+  if (start && end && start > end) {
     alert('"From" date must be before "To" date');
     return;
   }
-
   const query = new URLSearchParams();
-  if (startValue) query.set('start', new Date(`${startValue}T00:00:00`).toISOString());
-  if (endValue) query.set('end', new Date(`${endValue}T23:59:59.999`).toISOString());
-  if (device) query.set('device_id', device);
-
-  const button = document.getElementById('exportBtn');
+  if (start) query.set('start', start);
+  if (end) query.set('end', end);
+  if ($('exportDevice').value) query.set('device_id', $('exportDevice').value);
+  const button = $('exportBtn');
   button.disabled = true;
   try {
-    const res = await fetch(`${API_BASE}/api/channels/${channelId}/export.csv?${query.toString()}`);
+    const token = await getToken();
+    const res = await fetch(`${API_BASE}/api/channels/${channelId}/export.csv?${query}`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
     if (!res.ok) {
       let message = `Export failed (${res.status})`;
       try {
-        const body = await res.json();
-        if (body.error) message = body.error;
+        message = (await res.json()).error || message;
       } catch {}
       alert(message);
       return;
     }
-    const blob = await res.blob();
-    const href = URL.createObjectURL(blob);
+    const href = URL.createObjectURL(await res.blob());
     const link = document.createElement('a');
     link.href = href;
     link.download = `channel-${channelId}-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -769,31 +673,36 @@ document.getElementById('exportForm').addEventListener('submit', async (e) => {
   }
 });
 
-document.getElementById('clearBtn').addEventListener('click', async () => {
-  if (!confirm('Clear all stored data for this channel?')) return;
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}/clear`, {
-    method: 'POST',
-    headers: adminHeaders(channelId)
-  });
-  if (!res.ok) {
-    alert('Clear failed');
-    return;
+$('rotateBtn').addEventListener('click', async () => {
+  if (!confirm('Generate new write and read keys? Devices using the old keys stop working until updated.')) return;
+  try {
+    channel = await api(`/api/channels/${channelId}/rotate-keys`, { method: 'POST', body: { which: 'both' } });
+    fillKeys();
+  } catch (err) {
+    alert(err.message);
   }
-  loadFeeds();
-  loadAnalytics();
 });
 
-document.getElementById('deleteBtn').addEventListener('click', async () => {
-  if (!confirm('Delete this channel permanently?')) return;
-  const res = await fetch(`${API_BASE}/api/channels/${channelId}`, {
-    method: 'DELETE',
-    headers: adminHeaders(channelId)
-  });
-  if (!res.ok) {
-    alert('Delete failed');
-    return;
+$('clearBtn').addEventListener('click', async () => {
+  if (!confirm('Clear all stored data for this channel?')) return;
+  try {
+    await api(`/api/channels/${channelId}/clear`, { method: 'POST' });
+    loadFeeds();
+    loadAnalytics();
+    loadLive();
+  } catch (err) {
+    alert(err.message);
   }
-  window.location.href = 'index.html';
+});
+
+$('deleteBtn').addEventListener('click', async () => {
+  if (!confirm('Delete this channel permanently?')) return;
+  try {
+    await api(`/api/channels/${channelId}`, { method: 'DELETE' });
+    window.location.href = '/';
+  } catch (err) {
+    alert(err.message);
+  }
 });
 
 new MutationObserver(() => {
@@ -801,18 +710,50 @@ new MutationObserver(() => {
   if (analyticsChart) applyChartTheme(analyticsChart);
 }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
 
-setInterval(() => liveCards.forEach(refreshAge), 1000);
-setInterval(loadCommands, 5000);
+async function loadChannel() {
+  try {
+    channel = await api(`/api/channels/${channelId}`);
+    return true;
+  } catch (err) {
+    setStatus('');
+    if (err.status === 401) {
+      $('loginLink').href = `/login?next=${encodeURIComponent(`/channel/${channelId}`)}`;
+      $('loginCard').hidden = false;
+    } else {
+      $('errorText').textContent = err.message;
+      $('errorCard').hidden = false;
+    }
+    return false;
+  }
+}
 
-loadChannel()
-  .then(() => {
-    loadLive();
-    loadFeeds();
-    loadDevices();
-    loadAnalytics();
-    loadCommands();
-    connectWebSocket();
-    setInterval(loadDevices, 10000);
-    setInterval(loadAnalytics, 30000);
-  })
-  .catch(() => {});
+async function boot() {
+  if (!/^\d+$/.test(channelId || '')) {
+    window.location.href = '/';
+    return;
+  }
+  try {
+    await initAuth((n) => setStatus(`Server is waking up, retrying (${n})...`));
+  } catch {
+    setStatus('Server is not reachable. Refresh in a minute.');
+    return;
+  }
+  const session = await getSession();
+  $('logoutBtn').hidden = !session;
+  if (!(await loadChannel())) return;
+  setStatus('');
+  applyChannel();
+  show(PUBLIC_SECTIONS, true);
+  show(OWNER_SECTIONS, owner);
+  buildCharts();
+  await loadDevices();
+  loadAnalytics();
+  loadCommands();
+  connectSocket();
+  setInterval(() => liveCards.forEach(refreshAge), 1000);
+  setInterval(loadDevices, 15000);
+  setInterval(loadAnalytics, 60000);
+  if (owner) setInterval(loadCommands, 15000);
+}
+
+boot();

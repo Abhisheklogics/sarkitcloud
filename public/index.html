@@ -4,16 +4,29 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SarkitCloud &mdash; IoT Device Cloud</title>
+<meta name="description" content="SarkitCloud is an IoT cloud for ESP32, Arduino and Raspberry Pi. Send data over HTTP, watch live charts, control devices and export CSV.">
+<meta name="robots" content="index, follow">
+<meta name="theme-color" content="#3b6fe0">
+<link rel="canonical" href="%SITE_URL%/">
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SarkitCloud">
+<meta property="og:title" content="SarkitCloud - IoT Device Cloud">
+<meta property="og:description" content="Connect ESP32, Arduino or Raspberry Pi over HTTP. Live charts, device control and CSV export.">
+<meta property="og:url" content="%SITE_URL%/">
+<meta property="og:image" content="https://ik.imagekit.io/abhi1212/circuitphotos/SARKIT-Final.webp">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="css/style.css?v=4">
-<script src="js/theme.js?v=3"></script>
+<link rel="stylesheet" href="/css/style.css?v=4">
+<link rel="stylesheet" href="/css/auth.css?v=1">
+<script src="/js/theme.js?v=3"></script>
 </head>
 <body>
 
 <nav class="nav">
-  <a href="index.html" class="nav-brand">
+  <a href="/" class="nav-brand">
     <svg class="nav-logo" viewBox="0 0 28 28" fill="none" xmlns="http://www.w3.org/2000/svg">
       <rect x="9" y="9" width="10" height="10" rx="1.5" stroke="currentColor" stroke-width="1.6"/>
       <circle cx="14" cy="14" r="2" fill="currentColor"/>
@@ -31,7 +44,9 @@
         <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/>
       </svg>
     </button>
-    <button class="btn btn-accent" id="navCreateBtn">+ New channel</button>
+    <span class="user-email" id="userEmail" hidden></span>
+    <a href="/login" class="btn btn-accent" id="loginLink">Sign in</a>
+    <button type="button" class="btn btn-ghost" id="logoutBtn" hidden>Sign out</button>
   </div>
 </nav>
 
@@ -39,38 +54,20 @@
   <div class="hero-inner">
     <div class="hero-copy">
       <h1>Connect any device.<br>Watch the data arrive.</h1>
-      <p style="text-align: justify;">Sarkited collects readings from ESP32, Arduino, Raspberry Pi, or anything that can make an HTTP request &mdash; stores them, charts them, and pushes every update to your screen the instant it lands. Up to 20 fields per channel, no daily limits.</p>
-      <button class="btn btn-accent btn-lg" id="heroCreateBtn">Create a channel</button>
+      <p>SarkitCloud collects readings from ESP32, Arduino, Raspberry Pi, or anything that can make an HTTP request &mdash; stores them, charts them, and pushes every update to your screen the instant it lands. Up to 20 fields per channel.</p>
+      <a href="/login" class="btn btn-accent btn-lg" id="heroLogin">Get started</a>
+      <button type="button" class="btn btn-accent btn-lg" id="heroCreate" hidden>Create a channel</button>
     </div>
     <div class="hero-media">
-      <img src="https://ik.imagekit.io/abhi1212/circuitphotos/SARKIT-Final.webp" alt="Sarkited circuit board" height="400" width="600">
+      <img src="https://ik.imagekit.io/abhi1212/circuitphotos/SARKIT-Final.webp" alt="SarkitCloud circuit board" height="400" width="600">
     </div>
   </div>
 </header>
 
 <main class="container">
-  <section id="summaryBar" class="analytics-stats"></section>
+  <p class="hint" id="status" hidden></p>
 
-  <section class="section-block" id="getStarted">
-    <div class="section-heading">
-      <h2>Get your device sending data in 2 minutes</h2>
-    </div>
-    <div class="card">
-      <div id="hardwarePanel">
-        <ol style="line-height:1.8;">
-          <li>Create a channel above and copy its <strong>Write API Key</strong> from the channel page.</li>
-          <li>Open Arduino IDE with ESP32 board support installed (<code>WiFi.h</code> and <code>HTTPClient.h</code> are built in).</li>
-          <li>Paste the sketch below. Change only <strong>WRITE_API_KEY</strong> and <strong>SERVER_URL</strong> &mdash; nothing else needs to change.</li>
-          <li>Flash it to your ESP32 / ESP8266 board. It posts a reading every 15 seconds using plain HTTP.</li>
-          <li>Open the channel page here and watch live values and charts update in real time.</li>
-        </ol>
-        <pre id="hardwareCode" style="background:#0d1117; color:#d6e2ea; padding:16px; border-radius:8px; overflow-x:auto; font-family:'IBM Plex Mono', monospace; font-size:13px; white-space:pre;"></pre>
-        <button type="button" class="btn btn-ghost" id="copyHardwareBtn">Copy code</button>
-      </div>
-    </div>
-  </section>
-
-  <section class="section-block">
+  <section class="section-block" id="appSection" hidden>
     <div class="section-heading">
       <h2>Your channels</h2>
     </div>
@@ -79,53 +76,33 @@
 </main>
 
 <footer class="site-footer">
-  <span>SarkitCloud &mdash; sarkitedtech.com</span>
+  <span>SarkitCloud</span>
 </footer>
 
 <div class="modal-backdrop" id="modalBackdrop">
   <div class="modal">
     <div class="modal-header">
       <h2>Create a channel</h2>
-      <button class="modal-close" id="modalCloseBtn" aria-label="Close">&times;</button>
+      <button type="button" class="modal-close" id="modalCloseBtn" aria-label="Close">&times;</button>
     </div>
     <form id="channelForm">
-      <label>Channel name</label>
+      <label for="name">Channel name</label>
       <input type="text" id="name" required maxlength="60" placeholder="Garage Temperature">
-      <label>Description</label>
-      <input type="text" id="description" maxlength="120" placeholder="Optional">
+      <label for="description">Description</label>
+      <input type="text" id="description" maxlength="200" placeholder="Optional">
       <label>Fields (up to 20)</label>
       <div id="fieldsWrap">
-        <input type="text" class="fieldInput" placeholder="Field 1 name, e.g. temperature" required>
+        <input type="text" class="fieldInput" maxlength="60" placeholder="Field 1 name, e.g. temperature" required>
       </div>
       <button type="button" id="addFieldBtn" class="btn btn-ghost">+ Add field</button>
+      <p class="form-msg" id="createMsg" role="status"></p>
       <button type="submit" id="createBtn" class="btn btn-accent">Create channel</button>
     </form>
   </div>
 </div>
 
-<div class="modal-backdrop" id="adminKeyBackdrop">
-  <div class="modal">
-    <div class="modal-header">
-      <h2>Save your admin key</h2>
-    </div>
-    <div class="admin-key-body">
-      <p class="hint">This key is the <strong>only</strong> way to manage this channel from another device or browser &mdash; view its API keys, change settings, clear data, or delete it. It's already saved in this browser, but if you clear browser data or switch devices, you'll lose admin access unless you back it up now.</p>
-      <div class="id-row">
-        <span class="id-value" id="adminKeyValue"></span>
-        <button class="copy-btn" id="adminKeyCopyBtn">Copy</button>
-      </div>
-      <button type="button" class="btn btn-ghost" id="adminKeyDownloadBtn">Download as .txt</button>
-      <label class="checkbox-row">
-        <input type="checkbox" id="adminKeyConfirm">
-        I've saved this admin key somewhere safe
-      </label>
-      <button type="button" class="btn btn-accent" id="adminKeyContinueBtn" disabled>Continue to channel</button>
-    </div>
-  </div>
-</div>
-
-<script src="js/config.js"></script>
-<script src="js/onboarding.js"></script>
-<script src="js/home.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/dist/umd/supabase.js"></script>
+<script src="/js/config.js"></script>
+<script src="/js/home.js"></script>
 </body>
 </html>
